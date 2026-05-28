@@ -1,1 +1,55 @@
-node_modules
+# Dependencies
+node_modules/
+
+# React Native / Metro
+.metro/
+.bundle/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Android local configuration
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+
+# Android generated packages and reports
+*.apk
+*.ap_
+*.aab
+*.aar
+*.hprof
+android/app/release/
+android/app/debug/
+
+# Gradle
+.gradle/
+build/
+
+# Native build outputs
+.cxx/
+android/app/.cxx/
+
+# IDE / OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Keep source and required app assets tracked.
+!android/app/src/main/assets/
+!android/app/src/main/assets/input_mirror/
+!android/app/src/main/assets/input_mirror/input_mirror
