@@ -18,16 +18,25 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     override fun getName(): String = "InputMirror"
 
     @ReactMethod
-    fun startMirror(source: String, target: String, promise: Promise) {
+    fun startMirror(source: String, target: String, homeAsBack: Boolean, promise: Promise) {
         try {
             val binary = ensureBinaryInstalled()
-            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()} >/dev/null 2>&1 &"
+            val pidFile = getMirrorPidFile()
+            pidFile.writeText("")
+            pidFile.setReadable(true, false)
+            pidFile.setWritable(true, false)
+            val homeAsBackArg = if (homeAsBack) " --home-as-back" else ""
+            val pidFileArg = " --pid-file ${pidFile.absolutePath.shellQuote()}"
+            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()}$homeAsBackArg$pidFileArg >/dev/null 2>&1 & echo \$! > ${pidFile.absolutePath.shellQuote()}; chmod 666 ${pidFile.absolutePath.shellQuote()}"
             runSu(command)
             reactContext
-                .getSharedPreferences(InputMirrorTileService.PREFS, android.content.Context.MODE_PRIVATE)
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
                 .edit()
-                .putString(InputMirrorTileService.KEY_SOURCE, source)
-                .putString(InputMirrorTileService.KEY_TARGET, target)
+                .putString(KEY_SOURCE, source)
+                .putString(KEY_TARGET, target)
+                .putBoolean(KEY_HOME_AS_BACK, homeAsBack)
+                .putBoolean(KEY_EXPECTED_RUNNING, true)
+                .putLong(KEY_STARTED_AT, System.currentTimeMillis())
                 .apply()
             promise.resolve("started")
         } catch (error: Exception) {
@@ -39,6 +48,12 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     fun stopMirror(promise: Promise) {
         try {
             runSu(STOP_MIRROR_COMMAND)
+            getMirrorPidFile().delete()
+            reactContext
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_EXPECTED_RUNNING, false)
+                .apply()
             promise.resolve("stopped")
         } catch (error: Exception) {
             promise.reject("STOP_FAILED", error.message, error)
@@ -67,17 +82,38 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getMirrorStatus(promise: Promise) {
         try {
-            val prefs = reactContext.getSharedPreferences(
-                InputMirrorTileService.PREFS,
-                android.content.Context.MODE_PRIVATE,
-            )
-            val status: WritableMap = Arguments.createMap()
-            status.putBoolean("running", isMirrorProcessRunning())
-            status.putString("source", prefs.getString(InputMirrorTileService.KEY_SOURCE, null))
-            status.putString("target", prefs.getString(InputMirrorTileService.KEY_TARGET, null))
-            promise.resolve(status)
+            promise.resolve(buildMirrorStatus(isMirrorProcessRunning()))
         } catch (error: Exception) {
             promise.reject("STATUS_FAILED", error.message, error)
+        }
+    }
+
+    @ReactMethod
+    fun getMirrorStatusVerified(promise: Promise) {
+        try {
+            val running = isMirrorProcessRunningWithRoot()
+            val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_EXPECTED_RUNNING, running).apply()
+            if (!running) {
+                getMirrorPidFile().delete()
+            }
+            promise.resolve(buildMirrorStatus(running))
+        } catch (error: Exception) {
+            promise.reject("STATUS_VERIFY_FAILED", error.message, error)
+        }
+    }
+
+    @ReactMethod
+    fun setHomeAsBackEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            reactContext
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_HOME_AS_BACK, enabled)
+                .apply()
+            promise.resolve(enabled)
+        } catch (error: Exception) {
+            promise.reject("SAVE_SETTING_FAILED", error.message, error)
         }
     }
 
@@ -226,10 +262,51 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     private fun runShell(command: String): String = runProcess(arrayOf("sh", "-c", command))
 
     private fun isMirrorProcessRunning(): Boolean {
+        val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false)
+        val pidFile = getMirrorPidFile()
+        val pid = runCatching { pidFile.readText().trim().toIntOrNull() }.getOrNull()
+            ?: return expectedRunning
+        val procDir = File("/proc/$pid")
+        if (!procDir.exists()) {
+            return expectedRunning
+        }
+
+        val state = readProcessState(pid)
+        if (state == "Z") {
+            pidFile.delete()
+            prefs.edit().putBoolean(KEY_EXPECTED_RUNNING, false).apply()
+            return false
+        }
+
+        return true
+    }
+
+    private fun isMirrorProcessRunningWithRoot(): Boolean {
         return runCatching {
             runProcess(arrayOf("su", "-c", IS_MIRROR_RUNNING_COMMAND))
             true
         }.getOrDefault(false)
+    }
+
+    private fun buildMirrorStatus(running: Boolean): WritableMap {
+        val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val status: WritableMap = Arguments.createMap()
+        status.putBoolean("running", running)
+        status.putString("source", prefs.getString(KEY_SOURCE, null))
+        status.putString("target", prefs.getString(KEY_TARGET, null))
+        status.putBoolean("homeAsBack", prefs.getBoolean(KEY_HOME_AS_BACK, false))
+        return status
+    }
+
+    private fun getMirrorPidFile(): File = File(reactContext.filesDir, "input_mirror.pid")
+
+    private fun readProcessState(pid: Int): String? {
+        return runCatching {
+            val stat = File("/proc/$pid/stat").readText()
+            val stateStart = stat.lastIndexOf(") ") + 2
+            stat.substring(stateStart).trim().split(Regex("\\s+")).firstOrNull()
+        }.getOrNull()
     }
 
     private fun runProcess(command: Array<String>): String {
@@ -313,6 +390,12 @@ private val CONTROLLER_AXES = intArrayOf(
 private const val BUS_USB = 0x0003
 private const val BUS_BLUETOOTH = 0x0005
 private const val ODIN_VENDOR_ID = 0x2020
+private const val PREFS = "input_mirror"
+private const val KEY_SOURCE = "source"
+private const val KEY_TARGET = "target"
+private const val KEY_HOME_AS_BACK = "home_as_back"
+private const val KEY_EXPECTED_RUNNING = "expected_running"
+private const val KEY_STARTED_AT = "started_at"
 private const val IS_MIRROR_RUNNING_COMMAND =
     "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && exit 0; done; exit 1"
 private const val STOP_MIRROR_COMMAND =

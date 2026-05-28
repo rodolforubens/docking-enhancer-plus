@@ -42,14 +42,67 @@ static int write_full(int fd, const void *buffer, size_t length) {
     return 0;
 }
 
+static int is_home_button(unsigned short code) {
+#ifdef KEY_HOMEPAGE
+    if (code == KEY_HOMEPAGE) {
+        return 1;
+    }
+#endif
+#ifdef KEY_HOME
+    if (code == KEY_HOME) {
+        return 1;
+    }
+#endif
+#ifdef BTN_MODE
+    if (code == BTN_MODE) {
+        return 1;
+    }
+#endif
+    return code == 172;
+}
+
+static int write_pid_file(const char *pid_file_path) {
+    if (pid_file_path == NULL) {
+        return 0;
+    }
+
+    FILE *pid_file = fopen(pid_file_path, "w");
+    if (pid_file == NULL) {
+        fprintf(stderr, "Failed to open pid file %s: %s\n", pid_file_path, strerror(errno));
+        return -1;
+    }
+
+    fprintf(pid_file, "%ld\n", (long)getpid());
+    fclose(pid_file);
+    chmod(pid_file_path, 0666);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--pid-file PATH]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     const char *source_path = argv[1];
     const char *target_path = argv[2];
+    const char *pid_file_path = NULL;
+    int home_as_back = 0;
+
+    for (int index = 3; index < argc; index++) {
+        if (strcmp(argv[index], "--home-as-back") == 0) {
+            home_as_back = 1;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--pid-file") == 0 && index + 1 < argc) {
+            pid_file_path = argv[++index];
+            continue;
+        }
+
+        fprintf(stderr, "Unknown argument: %s\n", argv[index]);
+        return EXIT_FAILURE;
+    }
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -75,6 +128,8 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    write_pid_file(pid_file_path);
+
     struct input_event event;
     ssize_t bytes_read;
 
@@ -92,6 +147,13 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (home_as_back && event.type == EV_KEY && is_home_button(event.code)) {
+            if (event.value == 0) {
+                system("input keyevent 4");
+            }
+            continue;
+        }
+
         if (write_full(target_fd, &event, sizeof(event)) != 0) {
             fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
             break;
@@ -104,5 +166,8 @@ int main(int argc, char **argv) {
 
     close(target_fd);
     close(source_fd);
+    if (pid_file_path != NULL) {
+        unlink(pid_file_path);
+    }
     return EXIT_SUCCESS;
 }

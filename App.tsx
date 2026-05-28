@@ -8,6 +8,7 @@ import {
   SafeAreaView,
   ScrollView,
   StatusBar,
+  Switch,
   StyleSheet,
   Text,
   View,
@@ -24,14 +25,17 @@ type MirrorStatus = {
   running: boolean;
   source?: string | null;
   target?: string | null;
+  homeAsBack?: boolean;
 };
 
 type InputMirrorNative = {
-  startMirror(source: string, target: string): Promise<string>;
+  startMirror(source: string, target: string, homeAsBack: boolean): Promise<string>;
   stopMirror(): Promise<string>;
   getConnectedDevices(): Promise<InputDevice[]>;
   isMirrorRunning(): Promise<boolean>;
   getMirrorStatus(): Promise<MirrorStatus>;
+  getMirrorStatusVerified(): Promise<MirrorStatus>;
+  setHomeAsBackEnabled(enabled: boolean): Promise<boolean>;
 };
 
 type Slot = 'local' | 'external';
@@ -53,9 +57,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [homeAsBack, setHomeAsBack] = useState(false);
 
   const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
     setEnabled(status.running);
+    setHomeAsBack(Boolean(status.homeAsBack));
 
     if (!status.running) {
       return;
@@ -65,10 +71,10 @@ export default function App() {
     setLocalDevice(deviceFromSavedPath(status.target, availableDevices, 'Mando local guardado'));
   }, []);
 
-  const refreshDevices = useCallback(async () => {
+  const refreshDevices = useCallback(async (verifyWithRoot = false) => {
     const [result, status] = await Promise.all([
       InputMirror.getConnectedDevices(),
-      InputMirror.getMirrorStatus(),
+      verifyWithRoot ? InputMirror.getMirrorStatusVerified() : InputMirror.getMirrorStatus(),
     ]);
     setDevices(result);
     applyMirrorStatus(status, result);
@@ -93,7 +99,7 @@ export default function App() {
       try {
         const [result, status] = await Promise.all([
           InputMirror.getConnectedDevices(),
-          InputMirror.getMirrorStatus(),
+          InputMirror.getMirrorStatusVerified(),
         ]);
         if (!mounted) {
           return;
@@ -120,8 +126,7 @@ export default function App() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
       if (state === 'active') {
-        refreshDevices().catch(error => setMessage(error instanceof Error ? error.message : String(error)));
-        refreshMirrorState().catch(() => undefined);
+        refreshDevices(true).catch(error => setMessage(error instanceof Error ? error.message : String(error)));
       }
     });
 
@@ -174,6 +179,20 @@ export default function App() {
     setActiveSlot(slot);
   }
 
+  async function toggleHomeAsBack(nextValue: boolean) {
+    if (enabled || busy) {
+      return;
+    }
+
+    setHomeAsBack(nextValue);
+    try {
+      await InputMirror.setHomeAsBackEnabled(nextValue);
+    } catch (error) {
+      setHomeAsBack(!nextValue);
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function toggleMirror() {
     if (!canToggle || busy) {
       return;
@@ -191,7 +210,7 @@ export default function App() {
           return;
         }
 
-        await InputMirror.startMirror(externalDevice.path, localDevice.path);
+        await InputMirror.startMirror(externalDevice.path, localDevice.path, homeAsBack);
         setEnabled(true);
         setMessage('Espejo activo.');
       }
@@ -237,6 +256,29 @@ export default function App() {
                 onPress={() => openDeviceModal('external')}
               />
             </View>
+
+            <Pressable
+              focusable
+              disabled={enabled || busy}
+              onPress={() => toggleHomeAsBack(!homeAsBack)}
+              style={({focused, pressed}: PressableFocusState) => [
+                styles.settingRow,
+                focused && styles.focused,
+                pressed && styles.buttonPressed,
+                (enabled || busy) && styles.settingDisabled,
+              ]}>
+              <View style={styles.settingText}>
+                <Text style={styles.settingTitle}>Home como Back</Text>
+                <Text style={styles.settingDescription}>Botón Home del Mando Externo actúa como Back</Text>
+              </View>
+              <Switch
+                disabled={enabled || busy}
+                value={homeAsBack}
+                onValueChange={toggleHomeAsBack}
+                trackColor={{false: '#2b2d38', true: '#1f5d37'}}
+                thumbColor={homeAsBack ? '#75e299' : '#7e8494'}
+              />
+            </Pressable>
 
             <Pressable
               disabled={!canToggle || busy}
@@ -453,6 +495,35 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
     maxWidth: '100%',
+  },
+  settingRow: {
+    alignItems: 'center',
+    backgroundColor: '#1a1b22',
+    borderColor: '#2c2f3b',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 24,
+    minHeight: 66,
+    paddingHorizontal: 16,
+  },
+  settingDisabled: {
+    opacity: 0.62,
+  },
+  settingText: {
+    flex: 1,
+    paddingRight: 16,
+  },
+  settingTitle: {
+    color: '#f3f6fb',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 5,
+  },
+  settingDescription: {
+    color: '#74839a',
+    fontSize: 12,
   },
   button: {
     alignItems: 'center',
