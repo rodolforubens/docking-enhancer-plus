@@ -36,7 +36,7 @@ class InputMirrorTileService : TileService() {
 
     private fun isMirrorRunning(): Boolean {
         return runCatching {
-            runProcess(arrayOf("su", "-c", "pidof input_mirror >/dev/null"))
+            runProcess(arrayOf("su", "-c", IS_MIRROR_RUNNING_COMMAND))
             true
         }.getOrDefault(false)
     }
@@ -48,12 +48,19 @@ class InputMirrorTileService : TileService() {
         }
 
         val target = File(binDir, "input_mirror")
-        if (!target.exists() || target.length() == 0L) {
-            assets.open("input_mirror/input_mirror").use { input ->
-                target.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+        val temp = File(binDir, "input_mirror.tmp")
+        assets.open("input_mirror/input_mirror").use { input ->
+            temp.outputStream().use { output ->
+                input.copyTo(output)
             }
+        }
+
+        if (target.exists()) {
+            target.delete()
+        }
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
         }
 
         target.setReadable(true, false)
@@ -85,4 +92,7 @@ class InputMirrorTileService : TileService() {
 
 private fun String.shellQuote(): String = "'${replace("'", "'\"'\"'")}'"
 
-private const val STOP_MIRROR_COMMAND = "kill -TERM \$(pidof input_mirror 2>/dev/null) 2>/dev/null || true"
+private const val IS_MIRROR_RUNNING_COMMAND =
+    "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && exit 0; done; exit 1"
+private const val STOP_MIRROR_COMMAND =
+    "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"

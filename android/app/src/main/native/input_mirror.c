@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -67,6 +68,13 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    if (ioctl(source_fd, EVIOCGRAB, 1) < 0) {
+        fprintf(stderr, "Failed to grab source %s: %s\n", source_path, strerror(errno));
+        close(target_fd);
+        close(source_fd);
+        return EXIT_FAILURE;
+    }
+
     struct input_event event;
     ssize_t bytes_read;
 
@@ -88,6 +96,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
             break;
         }
+    }
+
+    if (ioctl(source_fd, EVIOCGRAB, 0) < 0) {
+        fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
 
     close(target_fd);

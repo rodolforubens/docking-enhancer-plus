@@ -1,6 +1,7 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
+  AppState,
   Modal,
   NativeModules,
   Pressable,
@@ -9,7 +10,6 @@ import {
   StatusBar,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
 import {IconDeviceGamepad2} from '@tabler/icons-react-native';
@@ -20,13 +20,27 @@ type InputDevice = {
   handlers?: string[];
 };
 
+type MirrorStatus = {
+  running: boolean;
+  source?: string | null;
+  target?: string | null;
+};
+
 type InputMirrorNative = {
   startMirror(source: string, target: string): Promise<string>;
   stopMirror(): Promise<string>;
   getConnectedDevices(): Promise<InputDevice[]>;
+  isMirrorRunning(): Promise<boolean>;
+  getMirrorStatus(): Promise<MirrorStatus>;
 };
 
 type Slot = 'local' | 'external';
+
+type PressableFocusState = {
+  focused?: boolean;
+  pressed?: boolean;
+  hovered?: boolean;
+};
 
 const {InputMirror} = NativeModules as {InputMirror: InputMirrorNative};
 
@@ -40,17 +54,53 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
 
+  const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
+    setEnabled(status.running);
+
+    if (!status.running) {
+      return;
+    }
+
+    setExternalDevice(deviceFromSavedPath(status.source, availableDevices, 'Mando externo guardado'));
+    setLocalDevice(deviceFromSavedPath(status.target, availableDevices, 'Mando local guardado'));
+  }, []);
+
+  const refreshDevices = useCallback(async () => {
+    const [result, status] = await Promise.all([
+      InputMirror.getConnectedDevices(),
+      InputMirror.getMirrorStatus(),
+    ]);
+    setDevices(result);
+    applyMirrorStatus(status, result);
+
+    if (!status.running) {
+      setLocalDevice(current => keepSelectedDevice(current, result));
+      setExternalDevice(current => keepSelectedDevice(current, result));
+    }
+
+    setMessage(result.length ? 'Dispositivos detectados.' : 'No se detectaron mandos.');
+  }, [applyMirrorStatus]);
+
+  const refreshMirrorState = useCallback(async () => {
+    const status = await InputMirror.getMirrorStatus();
+    applyMirrorStatus(status, devices);
+  }, [applyMirrorStatus, devices]);
+
   useEffect(() => {
     let mounted = true;
 
-    async function loadDevices() {
+    async function initialLoad() {
       try {
-        const result = await InputMirror.getConnectedDevices();
+        const [result, status] = await Promise.all([
+          InputMirror.getConnectedDevices(),
+          InputMirror.getMirrorStatus(),
+        ]);
         if (!mounted) {
           return;
         }
 
         setDevices(result);
+        applyMirrorStatus(status, result);
         setMessage(result.length ? 'Dispositivos detectados.' : 'No se detectaron mandos.');
       } catch (error) {
         setMessage(error instanceof Error ? error.message : String(error));
@@ -61,15 +111,42 @@ export default function App() {
       }
     }
 
-    loadDevices();
+    initialLoad();
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [applyMirrorStatus]);
 
-  const canToggle = useMemo(() => {
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        refreshDevices().catch(error => setMessage(error instanceof Error ? error.message : String(error)));
+        refreshMirrorState().catch(() => undefined);
+      }
+    });
+
+    const interval = setInterval(() => {
+      if (AppState.currentState === 'active') {
+        refreshMirrorState().catch(() => undefined);
+      }
+    }, 2000);
+
+    return () => {
+      subscription.remove();
+      clearInterval(interval);
+    };
+  }, [refreshDevices, refreshMirrorState]);
+
+  useEffect(() => {
+    if (activeSlot !== null) {
+      refreshDevices().catch(error => setMessage(error instanceof Error ? error.message : String(error)));
+    }
+  }, [activeSlot, refreshDevices]);
+
+  const canStart = useMemo(() => {
     return Boolean(localDevice && externalDevice && localDevice.path !== externalDevice.path);
   }, [localDevice, externalDevice]);
+  const canToggle = enabled || canStart;
 
   const modalTitle = activeSlot === 'local' ? 'Mando Local' : 'Mando Externo';
 
@@ -93,8 +170,12 @@ export default function App() {
     setActiveSlot(null);
   }
 
+  function openDeviceModal(slot: Slot) {
+    setActiveSlot(slot);
+  }
+
   async function toggleMirror() {
-    if (!canToggle || busy || !localDevice || !externalDevice) {
+    if (!canToggle || busy) {
       return;
     }
 
@@ -105,6 +186,11 @@ export default function App() {
         setEnabled(false);
         setMessage('Espejo detenido.');
       } else {
+        if (!localDevice || !externalDevice) {
+          setMessage('Selecciona un mando local y uno externo distintos.');
+          return;
+        }
+
         await InputMirror.startMirror(externalDevice.path, localDevice.path);
         setEnabled(true);
         setMessage('Espejo activo.');
@@ -141,32 +227,34 @@ export default function App() {
                 title="Mando Local"
                 device={localDevice}
                 selected={activeSlot === 'local'}
-                onPress={() => setActiveSlot('local')}
+                preferredFocus
+                onPress={() => openDeviceModal('local')}
               />
               <DeviceCard
                 title="Mando Externo"
                 device={externalDevice}
                 selected={activeSlot === 'external'}
-                onPress={() => setActiveSlot('external')}
+                onPress={() => openDeviceModal('external')}
               />
             </View>
 
-            <TouchableOpacity
-              activeOpacity={0.86}
+            <Pressable
               disabled={!canToggle || busy}
               onPress={toggleMirror}
-              style={[
+              style={({focused, pressed}: PressableFocusState) => [
                 styles.button,
                 enabled ? styles.buttonStop : styles.buttonStart,
                 (!canToggle || busy) && styles.buttonDisabled,
+                focused && styles.focused,
+                pressed && styles.buttonPressed,
               ]}>
               <Text style={styles.buttonText}>
                 {busy ? 'Procesando...' : enabled ? 'Desactivar Espejo' : 'Activar Espejo'}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
 
             <Text style={styles.message}>{message}</Text>
-            {!canToggle && (
+            {!enabled && !canStart && (
               <Text style={styles.hint}>Selecciona un mando local y uno externo distintos.</Text>
             )}
           </>
@@ -189,15 +277,21 @@ function DeviceCard({
   title,
   device,
   selected,
+  preferredFocus,
   onPress,
 }: {
   title: string;
   device: InputDevice | null;
   selected: boolean;
+  preferredFocus?: boolean;
   onPress: () => void;
 }) {
   return (
-    <Pressable onPress={onPress} style={[styles.card, selected && styles.cardSelected]}>
+    <Pressable
+      focusable
+      hasTVPreferredFocus={preferredFocus}
+      onPress={onPress}
+      style={({focused}: PressableFocusState) => [styles.card, selected && styles.cardSelected, focused && styles.focused]}>
       <IconDeviceGamepad2 color="#61718a" size={40} strokeWidth={2.2} style={styles.gamepadIcon} />
       <Text style={styles.cardTitle}>{title}</Text>
       <Text numberOfLines={1} style={device ? styles.cardDevice : styles.cardEmpty}>
@@ -224,14 +318,19 @@ function DeviceModal({
 }) {
   return (
     <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.overlay} onPress={onClose}>
-        <Pressable style={styles.modal} onPress={() => undefined}>
+      <Pressable focusable={false} style={styles.overlay} onPress={onClose}>
+        <Pressable focusable={false} style={styles.modal} onPress={() => undefined}>
           <Text style={styles.modalTitle}>{title}</Text>
           <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-            {devices.map(device => {
+            {devices.map((device, index) => {
               const selected = device.path === selectedPath;
               return (
-                <Pressable key={device.path} onPress={() => onSelect(device)} style={styles.option}>
+                <Pressable
+                  key={device.path}
+                  focusable
+                  hasTVPreferredFocus={index === 0}
+                  onPress={() => onSelect(device)}
+                  style={({focused}: PressableFocusState) => [styles.option, focused && styles.optionFocused]}>
                   <View style={[styles.radio, selected && styles.radioSelected]}>
                     {selected && <View style={styles.radioDot} />}
                   </View>
@@ -252,6 +351,22 @@ function DeviceModal({
       </Pressable>
     </Modal>
   );
+}
+
+function keepSelectedDevice(current: InputDevice | null, devices: InputDevice[]) {
+  if (!current) {
+    return null;
+  }
+
+  return devices.find(device => device.path === current.path) ?? null;
+}
+
+function deviceFromSavedPath(path: string | null | undefined, devices: InputDevice[], fallbackName: string) {
+  if (!path) {
+    return null;
+  }
+
+  return devices.find(device => device.path === path) ?? {name: fallbackName, path};
 }
 
 const styles = StyleSheet.create({
@@ -316,6 +431,10 @@ const styles = StyleSheet.create({
   cardSelected: {
     borderColor: '#6b86ad',
   },
+  focused: {
+    borderColor: '#9ec5ff',
+    backgroundColor: '#202331',
+  },
   gamepadIcon: {
     marginBottom: 14,
   },
@@ -353,6 +472,9 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: {
     opacity: 0.5,
+  },
+  buttonPressed: {
+    opacity: 0.82,
   },
   buttonText: {
     color: '#f7fbff',
@@ -411,8 +533,13 @@ const styles = StyleSheet.create({
   },
   option: {
     alignItems: 'center',
+    borderRadius: 8,
     flexDirection: 'row',
     minHeight: 58,
+    paddingHorizontal: 4,
+  },
+  optionFocused: {
+    backgroundColor: '#282b39',
   },
   radio: {
     alignItems: 'center',

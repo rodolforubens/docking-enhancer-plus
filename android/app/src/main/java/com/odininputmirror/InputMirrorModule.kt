@@ -9,6 +9,7 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
+import com.facebook.react.bridge.WritableMap
 import java.io.File
 
 class InputMirrorModule(private val reactContext: ReactApplicationContext) :
@@ -54,6 +55,32 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun isMirrorRunning(promise: Promise) {
+        try {
+            promise.resolve(isMirrorProcessRunning())
+        } catch (_: Exception) {
+            promise.resolve(false)
+        }
+    }
+
+    @ReactMethod
+    fun getMirrorStatus(promise: Promise) {
+        try {
+            val prefs = reactContext.getSharedPreferences(
+                InputMirrorTileService.PREFS,
+                android.content.Context.MODE_PRIVATE,
+            )
+            val status: WritableMap = Arguments.createMap()
+            status.putBoolean("running", isMirrorProcessRunning())
+            status.putString("source", prefs.getString(InputMirrorTileService.KEY_SOURCE, null))
+            status.putString("target", prefs.getString(InputMirrorTileService.KEY_TARGET, null))
+            promise.resolve(status)
+        } catch (error: Exception) {
+            promise.reject("STATUS_FAILED", error.message, error)
+        }
+    }
+
     private fun ensureBinaryInstalled(): File {
         val binDir = File(reactContext.filesDir, "bin")
         if (!binDir.exists()) {
@@ -61,12 +88,19 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         }
 
         val target = File(binDir, "input_mirror")
-        if (!target.exists() || target.length() == 0L) {
-            reactContext.assets.open("input_mirror/input_mirror").use { input ->
-                target.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+        val temp = File(binDir, "input_mirror.tmp")
+        reactContext.assets.open("input_mirror/input_mirror").use { input ->
+            temp.outputStream().use { output ->
+                input.copyTo(output)
             }
+        }
+
+        if (target.exists()) {
+            target.delete()
+        }
+        if (!temp.renameTo(target)) {
+            temp.copyTo(target, overwrite = true)
+            temp.delete()
         }
 
         target.setReadable(true, false)
@@ -127,9 +161,15 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     ): ProcInputEntry? {
         val normalizedName = controller.name.lowercase()
         val candidates = entries.filter { entry ->
+            if (!File("/dev/input/${entry.eventName}").exists()) {
+                return@filter false
+            }
+
             val sameVendorProduct =
                 controller.vendorId != 0 &&
                     controller.productId != 0 &&
+                    controller.vendorId != ODIN_VENDOR_ID &&
+                    entry.vendorId != ODIN_VENDOR_ID &&
                     entry.vendorId == controller.vendorId &&
                     entry.productId == controller.productId
             val sameName = entry.name.lowercase() == normalizedName
@@ -139,7 +179,9 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         return candidates
             .sortedWith(
                 compareByDescending<ProcInputEntry> {
-                    it.vendorId == controller.vendorId && it.productId == controller.productId
+                    controller.vendorId != ODIN_VENDOR_ID &&
+                        it.vendorId == controller.vendorId &&
+                        it.productId == controller.productId
                 }
                     .thenByDescending { it.bus == BUS_BLUETOOTH }
                     .thenByDescending { it.bus == BUS_USB && it.vendorId != ODIN_VENDOR_ID }
@@ -182,6 +224,13 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     private fun runSu(command: String): String = runProcess(arrayOf("su", "-c", command))
 
     private fun runShell(command: String): String = runProcess(arrayOf("sh", "-c", command))
+
+    private fun isMirrorProcessRunning(): Boolean {
+        return runCatching {
+            runProcess(arrayOf("su", "-c", IS_MIRROR_RUNNING_COMMAND))
+            true
+        }.getOrDefault(false)
+    }
 
     private fun runProcess(command: Array<String>): String {
         val process = ProcessBuilder(*command)
@@ -264,4 +313,7 @@ private val CONTROLLER_AXES = intArrayOf(
 private const val BUS_USB = 0x0003
 private const val BUS_BLUETOOTH = 0x0005
 private const val ODIN_VENDOR_ID = 0x2020
-private const val STOP_MIRROR_COMMAND = "kill -TERM \$(pidof input_mirror 2>/dev/null) 2>/dev/null || true"
+private const val IS_MIRROR_RUNNING_COMMAND =
+    "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && exit 0; done; exit 1"
+private const val STOP_MIRROR_COMMAND =
+    "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"
