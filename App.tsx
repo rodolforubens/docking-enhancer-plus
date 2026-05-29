@@ -26,16 +26,18 @@ type MirrorStatus = {
   source?: string | null;
   target?: string | null;
   homeAsBack?: boolean;
+  comboHoldKillApp?: boolean;
 };
 
 type InputMirrorNative = {
-  startMirror(source: string, target: string, homeAsBack: boolean): Promise<string>;
+  startMirror(source: string, target: string, homeAsBack: boolean, comboHoldKillApp: boolean): Promise<string>;
   stopMirror(): Promise<string>;
   getConnectedDevices(): Promise<InputDevice[]>;
   isMirrorRunning(): Promise<boolean>;
   getMirrorStatus(): Promise<MirrorStatus>;
   getMirrorStatusVerified(): Promise<MirrorStatus>;
   setHomeAsBackEnabled(enabled: boolean): Promise<boolean>;
+  setComboHoldKillAppEnabled(enabled: boolean): Promise<boolean>;
 };
 
 type Slot = 'local' | 'external';
@@ -58,10 +60,12 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [homeAsBack, setHomeAsBack] = useState(false);
+  const [comboHoldKillApp, setComboHoldKillApp] = useState(false);
 
   const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
     setEnabled(status.running);
     setHomeAsBack(Boolean(status.homeAsBack));
+    setComboHoldKillApp(Boolean(status.comboHoldKillApp));
 
     if (!status.running) {
       return;
@@ -193,6 +197,20 @@ export default function App() {
     }
   }
 
+  async function toggleComboHoldKillApp(nextValue: boolean) {
+    if (enabled || busy) {
+      return;
+    }
+
+    setComboHoldKillApp(nextValue);
+    try {
+      await InputMirror.setComboHoldKillAppEnabled(nextValue);
+    } catch (error) {
+      setComboHoldKillApp(!nextValue);
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function toggleMirror() {
     if (!canToggle || busy) {
       return;
@@ -210,11 +228,12 @@ export default function App() {
           return;
         }
 
-        await InputMirror.startMirror(externalDevice.path, localDevice.path, homeAsBack);
         setEnabled(true);
         setMessage('Espejo activo.');
+        await InputMirror.startMirror(externalDevice.path, localDevice.path, homeAsBack, comboHoldKillApp);
       }
     } catch (error) {
+      setEnabled(false);
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -224,7 +243,10 @@ export default function App() {
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar barStyle="light-content" backgroundColor="#0b0c0e" />
-      <View style={styles.container}>
+      <ScrollView
+        style={styles.scroller}
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <Text style={styles.title}>Odin Input Mirror</Text>
           <Text style={[styles.status, enabled ? styles.statusOn : styles.statusOff]}>
@@ -269,7 +291,7 @@ export default function App() {
               ]}>
               <View style={styles.settingText}>
                 <Text style={styles.settingTitle}>Home como Back</Text>
-                <Text style={styles.settingDescription}>Botón Home del Mando Externo actúa como Back</Text>
+                <Text style={styles.settingDescription}>Boton Home del Mando Externo actua como Back</Text>
               </View>
               <Switch
                 disabled={enabled || busy}
@@ -277,6 +299,29 @@ export default function App() {
                 onValueChange={toggleHomeAsBack}
                 trackColor={{false: '#2b2d38', true: '#1f5d37'}}
                 thumbColor={homeAsBack ? '#75e299' : '#7e8494'}
+              />
+            </Pressable>
+
+            <Pressable
+              focusable
+              disabled={enabled || busy}
+              onPress={() => toggleComboHoldKillApp(!comboHoldKillApp)}
+              style={({focused, pressed}: PressableFocusState) => [
+                styles.settingRow,
+                focused && styles.focused,
+                pressed && styles.buttonPressed,
+                (enabled || busy) && styles.settingDisabled,
+              ]}>
+              <View style={styles.settingText}>
+                <Text style={styles.settingTitle}>Select + Start cierra app</Text>
+                <Text style={styles.settingDescription}>Mantener Select y Start 3 segundos cierra la app actual</Text>
+              </View>
+              <Switch
+                disabled={enabled || busy}
+                value={comboHoldKillApp}
+                onValueChange={toggleComboHoldKillApp}
+                trackColor={{false: '#2b2d38', true: '#1f5d37'}}
+                thumbColor={comboHoldKillApp ? '#75e299' : '#7e8494'}
               />
             </Pressable>
 
@@ -301,7 +346,7 @@ export default function App() {
             )}
           </>
         )}
-      </View>
+      </ScrollView>
 
       <DeviceModal
         visible={activeSlot !== null}
@@ -416,11 +461,14 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0b0c0e',
   },
-  container: {
+  scroller: {
     flex: 1,
+  },
+  container: {
+    flexGrow: 1,
     paddingHorizontal: 22,
     paddingTop: 28,
-    paddingBottom: 20,
+    paddingBottom: 36,
   },
   header: {
     alignItems: 'center',

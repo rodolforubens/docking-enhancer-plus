@@ -18,7 +18,7 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     override fun getName(): String = "InputMirror"
 
     @ReactMethod
-    fun startMirror(source: String, target: String, homeAsBack: Boolean, promise: Promise) {
+    fun startMirror(source: String, target: String, homeAsBack: Boolean, comboHoldKillApp: Boolean, promise: Promise) {
         try {
             val binary = ensureBinaryInstalled()
             val pidFile = getMirrorPidFile()
@@ -26,8 +26,9 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
             pidFile.setReadable(true, false)
             pidFile.setWritable(true, false)
             val homeAsBackArg = if (homeAsBack) " --home-as-back" else ""
+            val comboHoldKillAppArg = if (comboHoldKillApp) " --combo-hold-kill-app" else ""
             val pidFileArg = " --pid-file ${pidFile.absolutePath.shellQuote()}"
-            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()}$homeAsBackArg$pidFileArg >/dev/null 2>&1 & echo \$! > ${pidFile.absolutePath.shellQuote()}; chmod 666 ${pidFile.absolutePath.shellQuote()}"
+            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg >/dev/null 2>&1 & echo \$! > ${pidFile.absolutePath.shellQuote()}; chmod 666 ${pidFile.absolutePath.shellQuote()}"
             runSu(command)
             reactContext
                 .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
@@ -35,6 +36,7 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
                 .putString(KEY_SOURCE, source)
                 .putString(KEY_TARGET, target)
                 .putBoolean(KEY_HOME_AS_BACK, homeAsBack)
+                .putBoolean(KEY_COMBO_HOLD_KILL_APP, comboHoldKillApp)
                 .putBoolean(KEY_EXPECTED_RUNNING, true)
                 .putLong(KEY_STARTED_AT, System.currentTimeMillis())
                 .apply()
@@ -110,6 +112,20 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
                 .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_HOME_AS_BACK, enabled)
+                .apply()
+            promise.resolve(enabled)
+        } catch (error: Exception) {
+            promise.reject("SAVE_SETTING_FAILED", error.message, error)
+        }
+    }
+
+    @ReactMethod
+    fun setComboHoldKillAppEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            reactContext
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_COMBO_HOLD_KILL_APP, enabled)
                 .apply()
             promise.resolve(enabled)
         } catch (error: Exception) {
@@ -296,6 +312,7 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         status.putString("source", prefs.getString(KEY_SOURCE, null))
         status.putString("target", prefs.getString(KEY_TARGET, null))
         status.putBoolean("homeAsBack", prefs.getBoolean(KEY_HOME_AS_BACK, false))
+        status.putBoolean("comboHoldKillApp", prefs.getBoolean(KEY_COMBO_HOLD_KILL_APP, false))
         return status
     }
 
@@ -394,6 +411,7 @@ private const val PREFS = "input_mirror"
 private const val KEY_SOURCE = "source"
 private const val KEY_TARGET = "target"
 private const val KEY_HOME_AS_BACK = "home_as_back"
+private const val KEY_COMBO_HOLD_KILL_APP = "combo_hold_kill_app"
 private const val KEY_EXPECTED_RUNNING = "expected_running"
 private const val KEY_STARTED_AT = "started_at"
 private const val IS_MIRROR_RUNNING_COMMAND =

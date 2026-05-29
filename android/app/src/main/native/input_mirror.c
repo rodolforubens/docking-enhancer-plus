@@ -6,11 +6,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static volatile sig_atomic_t keep_running = 1;
+static const long long COMBO_HOLD_KILL_APP_MS = 3000;
+
+struct held_key_state {
+    int pressed;
+    int forwarded;
+    struct input_event down_event;
+};
 
 static void handle_signal(int signal_number) {
     (void)signal_number;
@@ -61,6 +70,79 @@ static int is_home_button(unsigned short code) {
     return code == 172;
 }
 
+static int is_select_button(unsigned short code) {
+#ifdef BTN_SELECT
+    if (code == BTN_SELECT) {
+        return 1;
+    }
+#endif
+#ifdef KEY_SELECT
+    if (code == KEY_SELECT) {
+        return 1;
+    }
+#endif
+    return code == 314;
+}
+
+static int is_start_button(unsigned short code) {
+#ifdef BTN_START
+    if (code == BTN_START) {
+        return 1;
+    }
+#endif
+#ifdef KEY_START
+    if (code == KEY_START) {
+        return 1;
+    }
+#endif
+    return code == 315;
+}
+
+static long long now_ms(void) {
+    struct timespec current_time;
+    if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
+        return 0;
+    }
+
+    return ((long long)current_time.tv_sec * 1000LL) + ((long long)current_time.tv_nsec / 1000000LL);
+}
+
+static int write_key_event_with_sync(int fd, struct input_event *event) {
+    struct input_event sync_event;
+    memset(&sync_event, 0, sizeof(sync_event));
+    sync_event.type = EV_SYN;
+    sync_event.code = SYN_REPORT;
+    sync_event.value = 0;
+
+    if (write_full(fd, event, sizeof(*event)) != 0) {
+        return -1;
+    }
+    return write_full(fd, &sync_event, sizeof(sync_event));
+}
+
+static int forward_held_key_down(int fd, struct held_key_state *state) {
+    if (!state->pressed || state->forwarded) {
+        return 0;
+    }
+
+    if (write_key_event_with_sync(fd, &state->down_event) != 0) {
+        return -1;
+    }
+
+    state->forwarded = 1;
+    return 0;
+}
+
+static void force_stop_foreground_app(void) {
+    system(
+        "pkg=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
+        "task=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{.* t\\([0-9][0-9]*\\)}.*/\\1/p' | head -n 1); "
+        "[ -z \"$pkg\" ] && pkg=$(dumpsys window 2>/dev/null | sed -n 's/.*mFocusedApp=ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
+        "[ -z \"$task\" ] && task=$(dumpsys window 2>/dev/null | sed -n 's/.*mFocusedApp=ActivityRecord{.* t\\([0-9][0-9]*\\)}.*/\\1/p' | head -n 1); "
+        "case \"$pkg\" in ''|com.odininputmirror|com.android.systemui|com.android.launcher*|*launcher*) ;; *) [ -n \"$task\" ] && cmd activity stack remove \"$task\" 2>/dev/null; am force-stop \"$pkg\" ;; esac"
+    );
+}
+
 static int write_pid_file(const char *pid_file_path) {
     if (pid_file_path == NULL) {
         return 0;
@@ -80,7 +162,7 @@ static int write_pid_file(const char *pid_file_path) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--pid-file PATH]\n", argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--pid-file PATH]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -88,10 +170,16 @@ int main(int argc, char **argv) {
     const char *target_path = argv[2];
     const char *pid_file_path = NULL;
     int home_as_back = 0;
+    int combo_hold_kill_app = 0;
 
     for (int index = 3; index < argc; index++) {
         if (strcmp(argv[index], "--home-as-back") == 0) {
             home_as_back = 1;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--combo-hold-kill-app") == 0) {
+            combo_hold_kill_app = 1;
             continue;
         }
 
@@ -131,9 +219,61 @@ int main(int argc, char **argv) {
     write_pid_file(pid_file_path);
 
     struct input_event event;
-    ssize_t bytes_read;
+    struct held_key_state select_state;
+    struct held_key_state start_state;
+    memset(&select_state, 0, sizeof(select_state));
+    memset(&start_state, 0, sizeof(start_state));
 
-    while (keep_running && (bytes_read = read(source_fd, &event, sizeof(event))) != 0) {
+    int combo_triggered = 0;
+    long long combo_pressed_at_ms = 0;
+
+    while (keep_running) {
+        int timeout_ms = -1;
+        if (
+            combo_hold_kill_app &&
+            select_state.pressed &&
+            start_state.pressed &&
+            !select_state.forwarded &&
+            !start_state.forwarded &&
+            !combo_triggered
+        ) {
+            timeout_ms = 50;
+        }
+
+        struct pollfd source_poll;
+        source_poll.fd = source_fd;
+        source_poll.events = POLLIN;
+        source_poll.revents = 0;
+
+        int poll_result = poll(&source_poll, 1, timeout_ms);
+        if (poll_result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            fprintf(stderr, "Poll error from %s: %s\n", source_path, strerror(errno));
+            break;
+        }
+
+        if (poll_result == 0) {
+            if (
+                select_state.pressed &&
+                start_state.pressed &&
+                !select_state.forwarded &&
+                !start_state.forwarded &&
+                !combo_triggered &&
+                now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
+            ) {
+                force_stop_foreground_app();
+                combo_triggered = 1;
+            }
+            continue;
+        }
+
+        ssize_t bytes_read = read(source_fd, &event, sizeof(event));
+        if (bytes_read == 0) {
+            break;
+        }
+
         if (bytes_read < 0) {
             if (errno == EINTR) {
                 continue;
@@ -147,11 +287,85 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (home_as_back && event.type == EV_KEY && is_home_button(event.code)) {
-            if (event.value == 0) {
+        if (event.type == EV_KEY && is_home_button(event.code)) {
+            if (home_as_back && event.value == 0) {
                 system("input keyevent 4");
+                continue;
             }
-            continue;
+        }
+
+        if (combo_hold_kill_app && event.type == EV_KEY && (is_select_button(event.code) || is_start_button(event.code))) {
+            struct held_key_state *current_state = is_select_button(event.code) ? &select_state : &start_state;
+            struct held_key_state *other_state = current_state == &select_state ? &start_state : &select_state;
+
+            if (event.value == 1) {
+                current_state->pressed = 1;
+                current_state->forwarded = 0;
+                current_state->down_event = event;
+
+                if (select_state.pressed && start_state.pressed && !select_state.forwarded && !start_state.forwarded) {
+                    combo_pressed_at_ms = now_ms();
+                    combo_triggered = 0;
+                }
+                continue;
+            }
+
+            if (event.value == 2) {
+                if (
+                    select_state.pressed &&
+                    start_state.pressed &&
+                    !select_state.forwarded &&
+                    !start_state.forwarded &&
+                    !combo_triggered &&
+                    now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
+                ) {
+                    force_stop_foreground_app();
+                    combo_triggered = 1;
+                }
+
+                if (!select_state.pressed || !start_state.pressed || current_state->forwarded) {
+                    if (forward_held_key_down(target_fd, current_state) != 0) {
+                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
+                        break;
+                    }
+                    if (write_full(target_fd, &event, sizeof(event)) != 0) {
+                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if (event.value == 0) {
+                if (
+                    select_state.pressed &&
+                    start_state.pressed &&
+                    !select_state.forwarded &&
+                    !start_state.forwarded &&
+                    !combo_triggered &&
+                    now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
+                ) {
+                    force_stop_foreground_app();
+                    combo_triggered = 1;
+                }
+
+                if (!combo_triggered) {
+                    if (forward_held_key_down(target_fd, other_state) != 0 ||
+                        forward_held_key_down(target_fd, current_state) != 0 ||
+                        write_key_event_with_sync(target_fd, &event) != 0) {
+                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
+                        break;
+                    }
+                }
+
+                current_state->pressed = 0;
+                current_state->forwarded = 0;
+                if (!select_state.pressed && !start_state.pressed) {
+                    combo_triggered = 0;
+                    combo_pressed_at_ms = 0;
+                }
+                continue;
+            }
         }
 
         if (write_full(target_fd, &event, sizeof(event)) != 0) {
