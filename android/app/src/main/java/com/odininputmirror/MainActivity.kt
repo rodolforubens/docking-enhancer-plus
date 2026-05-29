@@ -6,7 +6,7 @@ import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnable
 import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
-    override fun getMainComponentName(): String = "OdinInputMirror"
+    override fun getMainComponentName(): String = "DockingEnhancer"
 
     override fun createReactActivityDelegate(): ReactActivityDelegate {
         return DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)

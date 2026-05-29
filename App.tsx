@@ -2,6 +2,7 @@ import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
   AppState,
+  InteractionManager,
   Modal,
   NativeModules,
   Pressable,
@@ -71,8 +72,8 @@ export default function App() {
       return;
     }
 
-    setExternalDevice(deviceFromSavedPath(status.source, availableDevices, 'Mando externo guardado'));
-    setLocalDevice(deviceFromSavedPath(status.target, availableDevices, 'Mando local guardado'));
+    setExternalDevice(deviceFromSavedPath(status.source, availableDevices, 'Saved external controller'));
+    setLocalDevice(deviceFromSavedPath(status.target, availableDevices, 'Saved local controller'));
   }, []);
 
   const refreshDevices = useCallback(async (verifyWithRoot = false) => {
@@ -88,7 +89,7 @@ export default function App() {
       setExternalDevice(current => keepSelectedDevice(current, result));
     }
 
-    setMessage(result.length ? 'Dispositivos detectados.' : 'No se detectaron mandos.');
+    setMessage(result.length ? 'Controllers detected.' : 'No controllers detected.');
   }, [applyMirrorStatus]);
 
   const refreshMirrorState = useCallback(async () => {
@@ -100,18 +101,20 @@ export default function App() {
     let mounted = true;
 
     async function initialLoad() {
+      let loadedDevices: InputDevice[] = [];
       try {
         const [result, status] = await Promise.all([
           InputMirror.getConnectedDevices(),
-          InputMirror.getMirrorStatusVerified(),
+          InputMirror.getMirrorStatus(),
         ]);
         if (!mounted) {
           return;
         }
 
+        loadedDevices = result;
         setDevices(result);
         applyMirrorStatus(status, result);
-        setMessage(result.length ? 'Dispositivos detectados.' : 'No se detectaron mandos.');
+        setMessage(result.length ? 'Controllers detected.' : 'No controllers detected.');
       } catch (error) {
         setMessage(error instanceof Error ? error.message : String(error));
       } finally {
@@ -119,11 +122,24 @@ export default function App() {
           setLoading(false);
         }
       }
+
+      if (!mounted) {
+        return;
+      }
+
+      InputMirror.getMirrorStatusVerified()
+        .then(status => {
+          if (mounted) {
+            applyMirrorStatus(status, loadedDevices);
+          }
+        })
+        .catch(() => undefined);
     }
 
-    initialLoad();
+    const interactionTask = InteractionManager.runAfterInteractions(initialLoad);
     return () => {
       mounted = false;
+      interactionTask.cancel();
     };
   }, [applyMirrorStatus]);
 
@@ -157,7 +173,7 @@ export default function App() {
   }, [localDevice, externalDevice]);
   const canToggle = enabled || canStart;
 
-  const modalTitle = activeSlot === 'local' ? 'Mando Local' : 'Mando Externo';
+  const modalTitle = activeSlot === 'local' ? 'Local Controller' : 'External Controller';
 
   function selectedDeviceFor(slot: Slot | null) {
     if (slot === 'local') {
@@ -221,15 +237,15 @@ export default function App() {
       if (enabled) {
         await InputMirror.stopMirror();
         setEnabled(false);
-        setMessage('Espejo detenido.');
+        setMessage('Mirror stopped.');
       } else {
         if (!localDevice || !externalDevice) {
-          setMessage('Selecciona un mando local y uno externo distintos.');
+          setMessage('Select different local and external controllers.');
           return;
         }
 
         setEnabled(true);
-        setMessage('Espejo activo.');
+        setMessage('Mirror active.');
         await InputMirror.startMirror(externalDevice.path, localDevice.path, homeAsBack, comboHoldKillApp);
       }
     } catch (error) {
@@ -248,103 +264,97 @@ export default function App() {
         contentContainerStyle={styles.container}
         keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
-          <Text style={styles.title}>Odin Input Mirror</Text>
+          <View style={styles.titleRow}>
+            <Text style={styles.title}>Docking Enhancer</Text>
+            {loading && <ActivityIndicator color="#87a7d7" size="small" />}
+          </View>
           <Text style={[styles.status, enabled ? styles.statusOn : styles.statusOff]}>
-            {enabled ? 'ACTIVO' : 'INACTIVO'}
+            {enabled ? 'ACTIVE' : 'INACTIVE'}
           </Text>
         </View>
 
-        <Text style={styles.subtitle}>Selecciona un mando para configurar</Text>
+        <Text style={styles.subtitle}>Select a controller to configure</Text>
 
-        {loading ? (
-          <View style={styles.loading}>
-            <ActivityIndicator color="#87a7d7" />
-            <Text style={styles.muted}>Buscando mandos...</Text>
+        <View style={styles.grid}>
+          <DeviceCard
+            title="Local Controller"
+            device={localDevice}
+            selected={activeSlot === 'local'}
+            preferredFocus
+            onPress={() => openDeviceModal('local')}
+          />
+          <DeviceCard
+            title="External Controller"
+            device={externalDevice}
+            selected={activeSlot === 'external'}
+            onPress={() => openDeviceModal('external')}
+          />
+        </View>
+
+        <Pressable
+          focusable
+          disabled={enabled || busy}
+          onPress={() => toggleHomeAsBack(!homeAsBack)}
+          style={({focused, pressed}: PressableFocusState) => [
+            styles.settingRow,
+            focused && styles.focused,
+            pressed && styles.buttonPressed,
+            (enabled || busy) && styles.settingDisabled,
+          ]}>
+          <View style={styles.settingText}>
+            <Text style={styles.settingTitle}>Home as Back</Text>
+            <Text style={styles.settingDescription}>External controller Home button acts as Back</Text>
           </View>
-        ) : (
-          <>
-            <View style={styles.grid}>
-              <DeviceCard
-                title="Mando Local"
-                device={localDevice}
-                selected={activeSlot === 'local'}
-                preferredFocus
-                onPress={() => openDeviceModal('local')}
-              />
-              <DeviceCard
-                title="Mando Externo"
-                device={externalDevice}
-                selected={activeSlot === 'external'}
-                onPress={() => openDeviceModal('external')}
-              />
-            </View>
+          <Switch
+            disabled={enabled || busy}
+            value={homeAsBack}
+            onValueChange={toggleHomeAsBack}
+            trackColor={{false: '#2b2d38', true: '#1f5d37'}}
+            thumbColor={homeAsBack ? '#75e299' : '#7e8494'}
+          />
+        </Pressable>
 
-            <Pressable
-              focusable
-              disabled={enabled || busy}
-              onPress={() => toggleHomeAsBack(!homeAsBack)}
-              style={({focused, pressed}: PressableFocusState) => [
-                styles.settingRow,
-                focused && styles.focused,
-                pressed && styles.buttonPressed,
-                (enabled || busy) && styles.settingDisabled,
-              ]}>
-              <View style={styles.settingText}>
-                <Text style={styles.settingTitle}>Home como Back</Text>
-                <Text style={styles.settingDescription}>Boton Home del Mando Externo actua como Back</Text>
-              </View>
-              <Switch
-                disabled={enabled || busy}
-                value={homeAsBack}
-                onValueChange={toggleHomeAsBack}
-                trackColor={{false: '#2b2d38', true: '#1f5d37'}}
-                thumbColor={homeAsBack ? '#75e299' : '#7e8494'}
-              />
-            </Pressable>
+        <Pressable
+          focusable
+          disabled={enabled || busy}
+          onPress={() => toggleComboHoldKillApp(!comboHoldKillApp)}
+          style={({focused, pressed}: PressableFocusState) => [
+            styles.settingRow,
+            focused && styles.focused,
+            pressed && styles.buttonPressed,
+            (enabled || busy) && styles.settingDisabled,
+          ]}>
+          <View style={styles.settingText}>
+            <Text style={styles.settingTitle}>Select + Start closes app</Text>
+            <Text style={styles.settingDescription}>Hold Select and Start for 3 seconds to close the current app</Text>
+          </View>
+          <Switch
+            disabled={enabled || busy}
+            value={comboHoldKillApp}
+            onValueChange={toggleComboHoldKillApp}
+            trackColor={{false: '#2b2d38', true: '#1f5d37'}}
+            thumbColor={comboHoldKillApp ? '#75e299' : '#7e8494'}
+          />
+        </Pressable>
 
-            <Pressable
-              focusable
-              disabled={enabled || busy}
-              onPress={() => toggleComboHoldKillApp(!comboHoldKillApp)}
-              style={({focused, pressed}: PressableFocusState) => [
-                styles.settingRow,
-                focused && styles.focused,
-                pressed && styles.buttonPressed,
-                (enabled || busy) && styles.settingDisabled,
-              ]}>
-              <View style={styles.settingText}>
-                <Text style={styles.settingTitle}>Select + Start cierra app</Text>
-                <Text style={styles.settingDescription}>Mantener Select y Start 3 segundos cierra la app actual</Text>
-              </View>
-              <Switch
-                disabled={enabled || busy}
-                value={comboHoldKillApp}
-                onValueChange={toggleComboHoldKillApp}
-                trackColor={{false: '#2b2d38', true: '#1f5d37'}}
-                thumbColor={comboHoldKillApp ? '#75e299' : '#7e8494'}
-              />
-            </Pressable>
+        <Pressable
+          disabled={!canToggle || busy || loading}
+          onPress={toggleMirror}
+          style={({focused, pressed}: PressableFocusState) => [
+            styles.button,
+            enabled ? styles.buttonStop : styles.buttonStart,
+            (!canToggle || busy || loading) && styles.buttonDisabled,
+            focused && styles.focused,
+            pressed && styles.buttonPressed,
+          ]}>
+          <Text style={styles.buttonText}>
+            {busy ? 'Processing...' : enabled ? 'Stop Mirror' : 'Start Mirror'}
+          </Text>
+        </Pressable>
 
-            <Pressable
-              disabled={!canToggle || busy}
-              onPress={toggleMirror}
-              style={({focused, pressed}: PressableFocusState) => [
-                styles.button,
-                enabled ? styles.buttonStop : styles.buttonStart,
-                (!canToggle || busy) && styles.buttonDisabled,
-                focused && styles.focused,
-                pressed && styles.buttonPressed,
-              ]}>
-              <Text style={styles.buttonText}>
-                {busy ? 'Procesando...' : enabled ? 'Desactivar Espejo' : 'Activar Espejo'}
-              </Text>
-            </Pressable>
-
-            <Text style={styles.message}>{message}</Text>
-            {!enabled && !canStart && (
-              <Text style={styles.hint}>Selecciona un mando local y uno externo distintos.</Text>
-            )}
-          </>
+        <Text style={styles.message}>{loading ? 'Scanning controllers...' : message}</Text>
+        {!loading && !enabled && !canStart && (
+          <Text style={styles.hint}>Select different local and external controllers.</Text>
         )}
       </ScrollView>
 
@@ -382,7 +392,7 @@ function DeviceCard({
       <IconDeviceGamepad2 color="#61718a" size={40} strokeWidth={2.2} style={styles.gamepadIcon} />
       <Text style={styles.cardTitle}>{title}</Text>
       <Text numberOfLines={1} style={device ? styles.cardDevice : styles.cardEmpty}>
-        {device?.name ?? 'Sin dispositivo'}
+        {device?.name ?? 'No device'}
       </Text>
     </Pressable>
   );
@@ -425,14 +435,11 @@ function DeviceModal({
                     <Text numberOfLines={1} style={styles.optionName}>
                       {device.name}
                     </Text>
-                    <Text numberOfLines={1} style={styles.optionPath}>
-                      {device.path}
-                    </Text>
                   </View>
                 </Pressable>
               );
             })}
-            {devices.length === 0 && <Text style={styles.emptyModal}>No se detectaron mandos.</Text>}
+            {devices.length === 0 && <Text style={styles.emptyModal}>No controllers detected.</Text>}
           </ScrollView>
         </Pressable>
       </Pressable>
@@ -475,6 +482,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     marginBottom: 34,
+  },
+  titleRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
   },
   title: {
     color: '#f4f7fb',
@@ -611,15 +623,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 6,
   },
-  loading: {
-    alignItems: 'center',
-    flex: 1,
-    gap: 14,
-    justifyContent: 'center',
-  },
-  muted: {
-    color: '#8fa0bc',
-  },
   overlay: {
     alignItems: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.78)',
@@ -690,11 +693,6 @@ const styles = StyleSheet.create({
     color: '#f3f6fb',
     fontSize: 14,
     fontWeight: '800',
-  },
-  optionPath: {
-    color: '#74839a',
-    fontSize: 12,
-    marginTop: 2,
   },
   emptyModal: {
     color: '#74839a',
