@@ -1,5 +1,8 @@
 package com.odininputmirror
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -18,28 +21,44 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     override fun getName(): String = "InputMirror"
 
     @ReactMethod
-    fun startMirror(source: String, target: String, homeAsBack: Boolean, comboHoldKillApp: Boolean, promise: Promise) {
+    fun startMirror(
+        source: String,
+        target: String,
+        homeAsBack: Boolean,
+        comboHoldKillApp: Boolean,
+        sourceGuid: String?,
+        targetGuid: String?,
+        promise: Promise,
+    ) {
         try {
             val binary = ensureBinaryInstalled()
             val pidFile = getMirrorPidFile()
+            val heartbeatFile = getMirrorHeartbeatFile()
             pidFile.writeText("")
             pidFile.setReadable(true, false)
             pidFile.setWritable(true, false)
+            heartbeatFile.writeText("")
+            heartbeatFile.setReadable(true, false)
+            heartbeatFile.setWritable(true, false)
             val homeAsBackArg = if (homeAsBack) " --home-as-back" else ""
             val comboHoldKillAppArg = if (comboHoldKillApp) " --combo-hold-kill-app" else ""
             val pidFileArg = " --pid-file ${pidFile.absolutePath.shellQuote()}"
-            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg >/dev/null 2>&1 & echo \$! > ${pidFile.absolutePath.shellQuote()}; chmod 666 ${pidFile.absolutePath.shellQuote()}"
+            val heartbeatFileArg = " --heartbeat-file ${heartbeatFile.absolutePath.shellQuote()}"
+            val command = "nice -n -20 ${binary.absolutePath.shellQuote()} ${source.shellQuote()} ${target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg$heartbeatFileArg >/dev/null 2>&1 & echo \$! > ${pidFile.absolutePath.shellQuote()}; chmod 666 ${pidFile.absolutePath.shellQuote()} ${heartbeatFile.absolutePath.shellQuote()}"
             runSu(command)
             reactContext
                 .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_SOURCE, source)
                 .putString(KEY_TARGET, target)
+                .putString(KEY_SOURCE_GUID, sourceGuid)
+                .putString(KEY_TARGET_GUID, targetGuid)
                 .putBoolean(KEY_HOME_AS_BACK, homeAsBack)
                 .putBoolean(KEY_COMBO_HOLD_KILL_APP, comboHoldKillApp)
                 .putBoolean(KEY_EXPECTED_RUNNING, true)
                 .putLong(KEY_STARTED_AT, System.currentTimeMillis())
                 .apply()
+            startSupervisorIfNeeded()
             promise.resolve("started")
         } catch (error: Exception) {
             promise.reject("START_FAILED", error.message, error)
@@ -51,11 +70,13 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         try {
             runSu(STOP_MIRROR_COMMAND)
             getMirrorPidFile().delete()
+            getMirrorHeartbeatFile().delete()
             reactContext
                 .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_EXPECTED_RUNNING, false)
                 .apply()
+            stopSupervisor()
             promise.resolve("stopped")
         } catch (error: Exception) {
             promise.reject("STOP_FAILED", error.message, error)
@@ -94,8 +115,6 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     fun getMirrorStatusVerified(promise: Promise) {
         try {
             val running = isMirrorProcessRunningWithRoot()
-            val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
-            prefs.edit().putBoolean(KEY_EXPECTED_RUNNING, running).apply()
             if (!running) {
                 getMirrorPidFile().delete()
             }
@@ -127,6 +146,26 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
                 .edit()
                 .putBoolean(KEY_COMBO_HOLD_KILL_APP, enabled)
                 .apply()
+            promise.resolve(enabled)
+        } catch (error: Exception) {
+            promise.reject("SAVE_SETTING_FAILED", error.message, error)
+        }
+    }
+
+    @ReactMethod
+    fun setAutoRestartEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            reactContext
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_AUTO_RESTART, enabled)
+                .apply()
+            val prefs = reactContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            if (enabled && prefs.getBoolean(KEY_EXPECTED_RUNNING, false)) {
+                startSupervisor()
+            } else {
+                stopSupervisor()
+            }
             promise.resolve(enabled)
         } catch (error: Exception) {
             promise.reject("SAVE_SETTING_FAILED", error.message, error)
@@ -280,12 +319,21 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     private fun isMirrorProcessRunning(): Boolean {
         val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
         val expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false)
+        val startedAt = prefs.getLong(KEY_STARTED_AT, 0L)
+        val startingGrace = expectedRunning && System.currentTimeMillis() - startedAt < STARTING_GRACE_MS
+        if (isHeartbeatFresh()) {
+            return true
+        }
+        if (!startingGrace) {
+            return false
+        }
+
         val pidFile = getMirrorPidFile()
         val pid = runCatching { pidFile.readText().trim().toIntOrNull() }.getOrNull()
-            ?: return expectedRunning
+            ?: return startingGrace
         val procDir = File("/proc/$pid")
         if (!procDir.exists()) {
-            return expectedRunning
+            return startingGrace
         }
 
         val state = readProcessState(pid)
@@ -296,6 +344,15 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         }
 
         return true
+    }
+
+    private fun isHeartbeatFresh(): Boolean {
+        val heartbeatFile = getMirrorHeartbeatFile()
+        if (!heartbeatFile.exists()) {
+            return false
+        }
+
+        return System.currentTimeMillis() - heartbeatFile.lastModified() <= HEARTBEAT_STALE_MS
     }
 
     private fun isMirrorProcessRunningWithRoot(): Boolean {
@@ -309,14 +366,40 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         val prefs = reactContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
         val status: WritableMap = Arguments.createMap()
         status.putBoolean("running", running)
+        status.putBoolean("expectedRunning", prefs.getBoolean(KEY_EXPECTED_RUNNING, false))
         status.putString("source", prefs.getString(KEY_SOURCE, null))
         status.putString("target", prefs.getString(KEY_TARGET, null))
+        status.putString("sourceGuid", prefs.getString(KEY_SOURCE_GUID, null))
+        status.putString("targetGuid", prefs.getString(KEY_TARGET_GUID, null))
         status.putBoolean("homeAsBack", prefs.getBoolean(KEY_HOME_AS_BACK, false))
         status.putBoolean("comboHoldKillApp", prefs.getBoolean(KEY_COMBO_HOLD_KILL_APP, false))
+        status.putBoolean("autoRestart", prefs.getBoolean(KEY_AUTO_RESTART, false))
         return status
     }
 
     private fun getMirrorPidFile(): File = File(reactContext.filesDir, "input_mirror.pid")
+
+    private fun getMirrorHeartbeatFile(): File = File(reactContext.filesDir, "input_mirror.heartbeat")
+
+    private fun startSupervisorIfNeeded() {
+        val prefs = reactContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_AUTO_RESTART, false)) {
+            startSupervisor()
+        }
+    }
+
+    private fun startSupervisor() {
+        val intent = Intent(reactContext, InputMirrorSupervisorService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            reactContext.startForegroundService(intent)
+        } else {
+            reactContext.startService(intent)
+        }
+    }
+
+    private fun stopSupervisor() {
+        reactContext.stopService(Intent(reactContext, InputMirrorSupervisorService::class.java))
+    }
 
     private fun readProcessState(pid: Int): String? {
         return runCatching {
@@ -342,11 +425,11 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     }
 }
 
-private fun String.shellQuote(): String = "'${replace("'", "'\"'\"'")}'"
+fun String.shellQuote(): String = "'${replace("'", "'\"'\"'")}'"
 
-private fun InputDevice.getGUID(): String = String.format("%016x%016x", productId, vendorId)
+fun InputDevice.getGUID(): String = String.format("%016x%016x", productId, vendorId)
 
-private fun Int.hasSource(source: Int): Boolean = this and source == source
+fun Int.hasSource(source: Int): Boolean = this and source == source
 
 private data class ProcInputEntry(
     val block: String,
@@ -372,7 +455,7 @@ private data class ProcInputEntry(
         get() = bus == 0x0003 && vendorId == 0x2020
 }
 
-private val CONTROLLER_BUTTONS = intArrayOf(
+val CONTROLLER_BUTTONS = intArrayOf(
     KeyEvent.KEYCODE_BUTTON_A,
     KeyEvent.KEYCODE_BUTTON_B,
     KeyEvent.KEYCODE_BUTTON_X,
@@ -391,7 +474,7 @@ private val CONTROLLER_BUTTONS = intArrayOf(
     KeyEvent.KEYCODE_DPAD_RIGHT,
 )
 
-private val CONTROLLER_AXES = intArrayOf(
+val CONTROLLER_AXES = intArrayOf(
     MotionEvent.AXIS_X,
     MotionEvent.AXIS_Y,
     MotionEvent.AXIS_Z,
@@ -404,17 +487,22 @@ private val CONTROLLER_AXES = intArrayOf(
     MotionEvent.AXIS_RTRIGGER,
 )
 
-private const val BUS_USB = 0x0003
-private const val BUS_BLUETOOTH = 0x0005
-private const val ODIN_VENDOR_ID = 0x2020
-private const val PREFS = "input_mirror"
-private const val KEY_SOURCE = "source"
-private const val KEY_TARGET = "target"
-private const val KEY_HOME_AS_BACK = "home_as_back"
-private const val KEY_COMBO_HOLD_KILL_APP = "combo_hold_kill_app"
-private const val KEY_EXPECTED_RUNNING = "expected_running"
-private const val KEY_STARTED_AT = "started_at"
-private const val IS_MIRROR_RUNNING_COMMAND =
+const val BUS_USB = 0x0003
+const val BUS_BLUETOOTH = 0x0005
+const val ODIN_VENDOR_ID = 0x2020
+const val PREFS = "input_mirror"
+const val KEY_SOURCE = "source"
+const val KEY_TARGET = "target"
+const val KEY_SOURCE_GUID = "source_guid"
+const val KEY_TARGET_GUID = "target_guid"
+const val KEY_HOME_AS_BACK = "home_as_back"
+const val KEY_COMBO_HOLD_KILL_APP = "combo_hold_kill_app"
+const val KEY_AUTO_RESTART = "auto_restart"
+const val KEY_EXPECTED_RUNNING = "expected_running"
+const val KEY_STARTED_AT = "started_at"
+const val STARTING_GRACE_MS = 1500L
+const val HEARTBEAT_STALE_MS = 5000L
+const val IS_MIRROR_RUNNING_COMMAND =
     "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && exit 0; done; exit 1"
-private const val STOP_MIRROR_COMMAND =
+const val STOP_MIRROR_COMMAND =
     "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"

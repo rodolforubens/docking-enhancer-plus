@@ -19,19 +19,32 @@ import {IconDeviceGamepad2} from '@tabler/icons-react-native';
 type InputDevice = {
   name: string;
   path: string;
+  guid?: string;
+  controllerNumber?: number;
   handlers?: string[];
 };
 
 type MirrorStatus = {
   running: boolean;
+  expectedRunning?: boolean;
   source?: string | null;
   target?: string | null;
+  sourceGuid?: string | null;
+  targetGuid?: string | null;
   homeAsBack?: boolean;
   comboHoldKillApp?: boolean;
+  autoRestart?: boolean;
 };
 
 type InputMirrorNative = {
-  startMirror(source: string, target: string, homeAsBack: boolean, comboHoldKillApp: boolean): Promise<string>;
+  startMirror(
+    source: string,
+    target: string,
+    homeAsBack: boolean,
+    comboHoldKillApp: boolean,
+    sourceGuid?: string | null,
+    targetGuid?: string | null,
+  ): Promise<string>;
   stopMirror(): Promise<string>;
   getConnectedDevices(): Promise<InputDevice[]>;
   isMirrorRunning(): Promise<boolean>;
@@ -39,6 +52,7 @@ type InputMirrorNative = {
   getMirrorStatusVerified(): Promise<MirrorStatus>;
   setHomeAsBackEnabled(enabled: boolean): Promise<boolean>;
   setComboHoldKillAppEnabled(enabled: boolean): Promise<boolean>;
+  setAutoRestartEnabled(enabled: boolean): Promise<boolean>;
 };
 
 type Slot = 'local' | 'external';
@@ -62,18 +76,26 @@ export default function App() {
   const [message, setMessage] = useState('');
   const [homeAsBack, setHomeAsBack] = useState(false);
   const [comboHoldKillApp, setComboHoldKillApp] = useState(false);
+  const [autoRestart, setAutoRestart] = useState(false);
+  const [restartWaiting, setRestartWaiting] = useState(false);
 
   const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
-    setEnabled(status.running);
+    const shouldShowEnabled = Boolean(status.running || (status.autoRestart && status.expectedRunning));
+    setEnabled(shouldShowEnabled);
     setHomeAsBack(Boolean(status.homeAsBack));
     setComboHoldKillApp(Boolean(status.comboHoldKillApp));
+    setAutoRestart(Boolean(status.autoRestart));
 
-    if (!status.running) {
+    if (!shouldShowEnabled) {
       return;
     }
 
-    setExternalDevice(deviceFromSavedPath(status.source, availableDevices, 'Saved external controller'));
-    setLocalDevice(deviceFromSavedPath(status.target, availableDevices, 'Saved local controller'));
+    setExternalDevice(current =>
+      deviceFromSavedIdentity(status.source, status.sourceGuid, availableDevices, current, 'Saved external controller'),
+    );
+    setLocalDevice(current =>
+      deviceFromSavedIdentity(status.target, status.targetGuid, availableDevices, current, 'Saved local controller'),
+    );
   }, []);
 
   const refreshDevices = useCallback(async (verifyWithRoot = false) => {
@@ -95,6 +117,7 @@ export default function App() {
   const refreshMirrorState = useCallback(async () => {
     const status = await InputMirror.getMirrorStatus();
     applyMirrorStatus(status, devices);
+    setRestartWaiting(Boolean(status.autoRestart && status.expectedRunning && !status.running));
   }, [applyMirrorStatus, devices]);
 
   useEffect(() => {
@@ -127,10 +150,11 @@ export default function App() {
         return;
       }
 
-      InputMirror.getMirrorStatusVerified()
+      InputMirror.getMirrorStatus()
         .then(status => {
           if (mounted) {
             applyMirrorStatus(status, loadedDevices);
+            setRestartWaiting(Boolean(status.autoRestart && status.expectedRunning && !status.running));
           }
         })
         .catch(() => undefined);
@@ -146,7 +170,7 @@ export default function App() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', state => {
       if (state === 'active') {
-        refreshDevices(true).catch(error => setMessage(error instanceof Error ? error.message : String(error)));
+        refreshDevices(false).catch(error => setMessage(error instanceof Error ? error.message : String(error)));
       }
     });
 
@@ -227,6 +251,24 @@ export default function App() {
     }
   }
 
+  async function toggleAutoRestart(nextValue: boolean) {
+    if (enabled || busy) {
+      return;
+    }
+
+    setAutoRestart(nextValue);
+    if (!nextValue) {
+      setRestartWaiting(false);
+    }
+
+    try {
+      await InputMirror.setAutoRestartEnabled(nextValue);
+    } catch (error) {
+      setAutoRestart(!nextValue);
+      setMessage(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function toggleMirror() {
     if (!canToggle || busy) {
       return;
@@ -246,7 +288,15 @@ export default function App() {
 
         setEnabled(true);
         setMessage('Mirror active.');
-        await InputMirror.startMirror(externalDevice.path, localDevice.path, homeAsBack, comboHoldKillApp);
+        await InputMirror.startMirror(
+          externalDevice.path,
+          localDevice.path,
+          homeAsBack,
+          comboHoldKillApp,
+          externalDevice.guid ?? null,
+          localDevice.guid ?? null,
+        );
+        setRestartWaiting(false);
       }
     } catch (error) {
       setEnabled(false);
@@ -309,8 +359,8 @@ export default function App() {
             disabled={enabled || busy}
             value={homeAsBack}
             onValueChange={toggleHomeAsBack}
-            trackColor={{false: '#2b2d38', true: '#1f5d37'}}
-            thumbColor={homeAsBack ? '#75e299' : '#7e8494'}
+            trackColor={{false: '#2b2d38', true: '#1585C3'}}
+            thumbColor={homeAsBack ? '#d7f1ff' : '#7e8494'}
           />
         </Pressable>
 
@@ -332,8 +382,31 @@ export default function App() {
             disabled={enabled || busy}
             value={comboHoldKillApp}
             onValueChange={toggleComboHoldKillApp}
-            trackColor={{false: '#2b2d38', true: '#1f5d37'}}
-            thumbColor={comboHoldKillApp ? '#75e299' : '#7e8494'}
+            trackColor={{false: '#2b2d38', true: '#1585C3'}}
+            thumbColor={comboHoldKillApp ? '#d7f1ff' : '#7e8494'}
+          />
+        </Pressable>
+
+        <Pressable
+          focusable
+          disabled={enabled || busy}
+          onPress={() => toggleAutoRestart(!autoRestart)}
+          style={({focused, pressed}: PressableFocusState) => [
+            styles.settingRow,
+            focused && styles.focused,
+            pressed && styles.buttonPressed,
+            (enabled || busy) && styles.settingDisabled,
+          ]}>
+          <View style={styles.settingText}>
+            <Text style={styles.settingTitle}>Auto restart mirror</Text>
+            <Text style={styles.settingDescription}>Restart when the mirror stops or controllers reconnect</Text>
+          </View>
+          <Switch
+            disabled={enabled || busy}
+            value={autoRestart}
+            onValueChange={toggleAutoRestart}
+            trackColor={{false: '#2b2d38', true: '#1585C3'}}
+            thumbColor={autoRestart ? '#d7f1ff' : '#7e8494'}
           />
         </Pressable>
 
@@ -352,7 +425,9 @@ export default function App() {
           </Text>
         </Pressable>
 
-        <Text style={styles.message}>{loading ? 'Scanning controllers...' : message}</Text>
+        <Text style={styles.message}>
+          {loading ? 'Scanning controllers...' : restartWaiting ? 'Waiting for controllers to reconnect...' : message}
+        </Text>
         {!loading && !enabled && !canStart && (
           <Text style={styles.hint}>Select different local and external controllers.</Text>
         )}
@@ -455,12 +530,46 @@ function keepSelectedDevice(current: InputDevice | null, devices: InputDevice[])
   return devices.find(device => device.path === current.path) ?? null;
 }
 
-function deviceFromSavedPath(path: string | null | undefined, devices: InputDevice[], fallbackName: string) {
-  if (!path) {
+function findDeviceBySavedIdentity(
+  path: string | null | undefined,
+  guid: string | null | undefined,
+  devices: InputDevice[],
+) {
+  if (guid) {
+    const guidMatch = devices.find(device => device.guid === guid);
+    if (guidMatch) {
+      return guidMatch;
+    }
+  }
+
+  if (path) {
+    return devices.find(device => device.path === path) ?? null;
+  }
+
+  return null;
+}
+
+function deviceFromSavedIdentity(
+  path: string | null | undefined,
+  guid: string | null | undefined,
+  devices: InputDevice[],
+  current: InputDevice | null,
+  fallbackName: string,
+) {
+  const found = findDeviceBySavedIdentity(path, guid, devices);
+  if (found) {
+    return found;
+  }
+
+  if (current && ((guid && current.guid === guid) || (path && current.path === path))) {
+    return current;
+  }
+
+  if (!path && !guid) {
     return null;
   }
 
-  return devices.find(device => device.path === path) ?? {name: fallbackName, path};
+  return {name: fallbackName, path: path ?? '', guid: guid ?? undefined};
 }
 
 const styles = StyleSheet.create({
@@ -502,8 +611,8 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
   },
   statusOn: {
-    backgroundColor: '#123621',
-    color: '#69e18d',
+    backgroundColor: '#0f3850',
+    color: '#58c7ff',
   },
   statusOff: {
     backgroundColor: '#3b1719',
@@ -590,9 +699,10 @@ const styles = StyleSheet.create({
     borderColor: '#4a4b51',
     borderRadius: 7,
     borderWidth: 1,
-    height: 36,
     justifyContent: 'center',
     marginBottom: 16,
+    minHeight: 44,
+    paddingVertical: 10,
   },
   buttonStart: {
     backgroundColor: 'transparent',
@@ -602,7 +712,9 @@ const styles = StyleSheet.create({
     borderColor: '#723033',
   },
   buttonDisabled: {
-    opacity: 0.5,
+    backgroundColor: '#0b3f5f',
+    borderColor: '#0f4e75',
+    opacity: 0.68,
   },
   buttonPressed: {
     opacity: 0.82,

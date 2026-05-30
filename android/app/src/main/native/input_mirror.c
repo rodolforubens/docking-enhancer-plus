@@ -14,12 +14,7 @@
 
 static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
-
-struct held_key_state {
-    int pressed;
-    int forwarded;
-    struct input_event down_event;
-};
+static const long long HEARTBEAT_INTERVAL_MS = 1000;
 
 static void handle_signal(int signal_number) {
     (void)signal_number;
@@ -107,32 +102,6 @@ static long long now_ms(void) {
     return ((long long)current_time.tv_sec * 1000LL) + ((long long)current_time.tv_nsec / 1000000LL);
 }
 
-static int write_key_event_with_sync(int fd, struct input_event *event) {
-    struct input_event sync_event;
-    memset(&sync_event, 0, sizeof(sync_event));
-    sync_event.type = EV_SYN;
-    sync_event.code = SYN_REPORT;
-    sync_event.value = 0;
-
-    if (write_full(fd, event, sizeof(*event)) != 0) {
-        return -1;
-    }
-    return write_full(fd, &sync_event, sizeof(sync_event));
-}
-
-static int forward_held_key_down(int fd, struct held_key_state *state) {
-    if (!state->pressed || state->forwarded) {
-        return 0;
-    }
-
-    if (write_key_event_with_sync(fd, &state->down_event) != 0) {
-        return -1;
-    }
-
-    state->forwarded = 1;
-    return 0;
-}
-
 static void force_stop_foreground_app(void) {
     system(
         "pkg=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
@@ -160,15 +129,33 @@ static int write_pid_file(const char *pid_file_path) {
     return 0;
 }
 
+static int write_heartbeat_file(const char *heartbeat_file_path) {
+    if (heartbeat_file_path == NULL) {
+        return 0;
+    }
+
+    FILE *heartbeat_file = fopen(heartbeat_file_path, "w");
+    if (heartbeat_file == NULL) {
+        fprintf(stderr, "Failed to open heartbeat file %s: %s\n", heartbeat_file_path, strerror(errno));
+        return -1;
+    }
+
+    fprintf(heartbeat_file, "%lld\n", now_ms());
+    fclose(heartbeat_file);
+    chmod(heartbeat_file_path, 0666);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--pid-file PATH]\n", argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--pid-file PATH] [--heartbeat-file PATH]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
     const char *source_path = argv[1];
     const char *target_path = argv[2];
     const char *pid_file_path = NULL;
+    const char *heartbeat_file_path = NULL;
     int home_as_back = 0;
     int combo_hold_kill_app = 0;
 
@@ -185,6 +172,11 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[index], "--pid-file") == 0 && index + 1 < argc) {
             pid_file_path = argv[++index];
+            continue;
+        }
+
+        if (strcmp(argv[index], "--heartbeat-file") == 0 && index + 1 < argc) {
+            heartbeat_file_path = argv[++index];
             continue;
         }
 
@@ -217,27 +209,31 @@ int main(int argc, char **argv) {
     }
 
     write_pid_file(pid_file_path);
+    write_heartbeat_file(heartbeat_file_path);
 
     struct input_event event;
-    struct held_key_state select_state;
-    struct held_key_state start_state;
-    memset(&select_state, 0, sizeof(select_state));
-    memset(&start_state, 0, sizeof(start_state));
+    int select_pressed = 0;
+    int start_pressed = 0;
 
     int combo_triggered = 0;
     long long combo_pressed_at_ms = 0;
+    long long last_heartbeat_ms = 0;
 
     while (keep_running) {
-        int timeout_ms = -1;
+        int timeout_ms = 1000;
         if (
             combo_hold_kill_app &&
-            select_state.pressed &&
-            start_state.pressed &&
-            !select_state.forwarded &&
-            !start_state.forwarded &&
+            select_pressed &&
+            start_pressed &&
             !combo_triggered
         ) {
             timeout_ms = 50;
+        }
+
+        long long heartbeat_now_ms = now_ms();
+        if (heartbeat_now_ms - last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
+            write_heartbeat_file(heartbeat_file_path);
+            last_heartbeat_ms = heartbeat_now_ms;
         }
 
         struct pollfd source_poll;
@@ -256,10 +252,8 @@ int main(int argc, char **argv) {
 
         if (poll_result == 0) {
             if (
-                select_state.pressed &&
-                start_state.pressed &&
-                !select_state.forwarded &&
-                !start_state.forwarded &&
+                select_pressed &&
+                start_pressed &&
                 !combo_triggered &&
                 now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
             ) {
@@ -295,53 +289,37 @@ int main(int argc, char **argv) {
         }
 
         if (combo_hold_kill_app && event.type == EV_KEY && (is_select_button(event.code) || is_start_button(event.code))) {
-            struct held_key_state *current_state = is_select_button(event.code) ? &select_state : &start_state;
-            struct held_key_state *other_state = current_state == &select_state ? &start_state : &select_state;
+            int is_select = is_select_button(event.code);
 
             if (event.value == 1) {
-                current_state->pressed = 1;
-                current_state->forwarded = 0;
-                current_state->down_event = event;
+                if (is_select) {
+                    select_pressed = 1;
+                } else {
+                    start_pressed = 1;
+                }
 
-                if (select_state.pressed && start_state.pressed && !select_state.forwarded && !start_state.forwarded) {
+                if (select_pressed && start_pressed) {
                     combo_pressed_at_ms = now_ms();
                     combo_triggered = 0;
                 }
-                continue;
             }
 
             if (event.value == 2) {
                 if (
-                    select_state.pressed &&
-                    start_state.pressed &&
-                    !select_state.forwarded &&
-                    !start_state.forwarded &&
+                    select_pressed &&
+                    start_pressed &&
                     !combo_triggered &&
                     now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
                 ) {
                     force_stop_foreground_app();
                     combo_triggered = 1;
                 }
-
-                if (!select_state.pressed || !start_state.pressed || current_state->forwarded) {
-                    if (forward_held_key_down(target_fd, current_state) != 0) {
-                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
-                        break;
-                    }
-                    if (write_full(target_fd, &event, sizeof(event)) != 0) {
-                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
-                        break;
-                    }
-                }
-                continue;
             }
 
             if (event.value == 0) {
                 if (
-                    select_state.pressed &&
-                    start_state.pressed &&
-                    !select_state.forwarded &&
-                    !start_state.forwarded &&
+                    select_pressed &&
+                    start_pressed &&
                     !combo_triggered &&
                     now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
                 ) {
@@ -349,22 +327,15 @@ int main(int argc, char **argv) {
                     combo_triggered = 1;
                 }
 
-                if (!combo_triggered) {
-                    if (forward_held_key_down(target_fd, other_state) != 0 ||
-                        forward_held_key_down(target_fd, current_state) != 0 ||
-                        write_key_event_with_sync(target_fd, &event) != 0) {
-                        fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
-                        break;
-                    }
+                if (is_select) {
+                    select_pressed = 0;
+                } else {
+                    start_pressed = 0;
                 }
-
-                current_state->pressed = 0;
-                current_state->forwarded = 0;
-                if (!select_state.pressed && !start_state.pressed) {
+                if (!select_pressed && !start_pressed) {
                     combo_triggered = 0;
                     combo_pressed_at_ms = 0;
                 }
-                continue;
             }
         }
 
@@ -382,6 +353,9 @@ int main(int argc, char **argv) {
     close(source_fd);
     if (pid_file_path != NULL) {
         unlink(pid_file_path);
+    }
+    if (heartbeat_file_path != NULL) {
+        unlink(heartbeat_file_path);
     }
     return EXIT_SUCCESS;
 }
