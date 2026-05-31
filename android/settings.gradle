@@ -25,4 +25,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "OdinInputMirror"
 include ":app"
+include ":domain"
+include ":data"
 includeBuild("../node_modules/@react-native/gradle-plugin")

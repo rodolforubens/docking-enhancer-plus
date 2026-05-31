@@ -43,6 +43,10 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Local agent skills/config
+.agents/
+skills-lock.json
+
 # Temporary files
 tmp/
 temp/
