@@ -60,6 +60,20 @@ class MirrorUseCaseTest {
     }
 
     @Test
+    fun stopMirrorStillClearsFilesAndMarksNotExpectedWhenStopFails() {
+        val process = FakeMirrorProcessRepository(throwOnStop = true)
+        val settings = FakeMirrorSettingsRepository(
+            MirrorSettings(source = "/dev/input/event9", target = "/dev/input/event2", expectedRunning = true),
+        )
+
+        runCatching { StopMirrorUseCase(process, settings)() }
+
+        assertEquals(1, process.stopCount)
+        assertEquals(1, process.clearProcessFilesCount)
+        assertFalse(settings.state.expectedRunning)
+    }
+
+    @Test
     fun getMirrorStatusUsesFastRunningCheckByDefaultAndReturnsPersistedSettings() {
         val process = FakeMirrorProcessRepository(running = true, verifiedRunning = false)
         val settings = FakeMirrorSettingsRepository(
@@ -360,6 +374,7 @@ class MirrorUseCaseTest {
 private class FakeMirrorProcessRepository(
     private val running: Boolean = false,
     private val verifiedRunning: Boolean = false,
+    private val throwOnStop: Boolean = false,
 ) : MirrorProcessRepository {
     val startRequests = mutableListOf<MirrorStartRequest>()
     var stopCount = 0
@@ -373,6 +388,9 @@ private class FakeMirrorProcessRepository(
 
     override fun stop() {
         stopCount += 1
+        if (throwOnStop) {
+            throw IllegalStateException("Stop failed")
+        }
     }
 
     override fun isRunning(): Boolean {

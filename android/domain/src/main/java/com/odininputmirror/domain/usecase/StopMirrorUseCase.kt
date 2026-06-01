@@ -8,8 +8,11 @@ class StopMirrorUseCase(
     private val mirrorSettingsRepository: MirrorSettingsRepository,
 ) {
     operator fun invoke() {
-        mirrorProcessRepository.stop()
-        mirrorProcessRepository.clearProcessFiles()
-        mirrorSettingsRepository.setExpectedRunning(false)
+        try {
+            mirrorProcessRepository.stop()
+        } finally {
+            mirrorProcessRepository.clearProcessFiles()
+            mirrorSettingsRepository.setExpectedRunning(false)
+        }
     }
 }

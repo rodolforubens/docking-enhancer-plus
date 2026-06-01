@@ -1,7 +1,8 @@
-import React from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   Modal,
+  findNodeHandle,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -14,6 +15,7 @@ import {
 import {IconDeviceGamepad2} from '@tabler/icons-react-native';
 import {useMirrorController} from './src/mirror/useMirrorController';
 import type {InputDevice} from './src/mirror/types';
+import {palette, radius, spacing} from './src/theme/tokens';
 
 type PressableFocusState = {
   focused?: boolean;
@@ -21,7 +23,22 @@ type PressableFocusState = {
   hovered?: boolean;
 };
 
+type TvFocusProps = {
+  nextFocusUp?: number;
+  nextFocusDown?: number;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+};
+
 export default function App() {
+  const localCardRef = useRef<View>(null);
+  const externalCardRef = useRef<View>(null);
+  const homeRowRef = useRef<View>(null);
+  const comboRowRef = useRef<View>(null);
+  const restartRowRef = useRef<View>(null);
+  const ctaRef = useRef<View>(null);
+  const [focusIds, setFocusIds] = useState<Record<string, number>>({});
+
   const {
     devices,
     localDevice,
@@ -48,6 +65,22 @@ export default function App() {
     toggleMirror,
   } = useMirrorController();
 
+  useEffect(() => {
+    const updateFocusIds = () => {
+      setFocusIds({
+        local: findNodeHandle(localCardRef.current) ?? 0,
+        external: findNodeHandle(externalCardRef.current) ?? 0,
+        home: findNodeHandle(homeRowRef.current) ?? 0,
+        combo: findNodeHandle(comboRowRef.current) ?? 0,
+        restart: findNodeHandle(restartRowRef.current) ?? 0,
+        cta: findNodeHandle(ctaRef.current) ?? 0,
+      });
+    };
+
+    const timeout = setTimeout(updateFocusIds, 0);
+    return () => clearTimeout(timeout);
+  }, []);
+
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar barStyle="light-content" backgroundColor="#0b0c0e" />
@@ -65,20 +98,27 @@ export default function App() {
           </Text>
         </View>
 
-        <Text style={styles.subtitle}>Select a controller to configure</Text>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Controller Mapping</Text>
+          <Text style={styles.subtitle}>Select a controller to configure</Text>
+        </View>
 
         <View style={styles.grid}>
           <DeviceCard
+            pressableRef={localCardRef}
             title="Local Controller"
             device={localDevice}
             selected={activeSlot === 'local'}
             preferredFocus
+            tvFocus={{nextFocusRight: focusIds.external, nextFocusDown: focusIds.home}}
             onPress={() => openDeviceModal('local')}
           />
           <DeviceCard
+            pressableRef={externalCardRef}
             title="External Controller"
             device={externalDevice}
             selected={activeSlot === 'external'}
+            tvFocus={{nextFocusLeft: focusIds.local, nextFocusDown: focusIds.home}}
             onPress={() => openDeviceModal('external')}
           />
         </View>
@@ -86,6 +126,11 @@ export default function App() {
         <Pressable
           focusable
           disabled={enabled || busy}
+          ref={homeRowRef}
+          {...({nextFocusUp: focusIds.local, nextFocusDown: focusIds.combo} as any)}
+          accessibilityRole="switch"
+          accessibilityLabel="Home as Back"
+          accessibilityState={{disabled: enabled || busy, checked: homeAsBack}}
           onPress={() => toggleHomeAsBack(!homeAsBack)}
           style={({focused, pressed}: PressableFocusState) => [
             styles.settingRow,
@@ -109,6 +154,11 @@ export default function App() {
         <Pressable
           focusable
           disabled={enabled || busy}
+          ref={comboRowRef}
+          {...({nextFocusUp: focusIds.home, nextFocusDown: focusIds.restart} as any)}
+          accessibilityRole="switch"
+          accessibilityLabel="Select plus Start closes app"
+          accessibilityState={{disabled: enabled || busy, checked: comboHoldKillApp}}
           onPress={() => toggleComboHoldKillApp(!comboHoldKillApp)}
           style={({focused, pressed}: PressableFocusState) => [
             styles.settingRow,
@@ -132,6 +182,11 @@ export default function App() {
         <Pressable
           focusable
           disabled={enabled || busy}
+          ref={restartRowRef}
+          {...({nextFocusUp: focusIds.combo, nextFocusDown: focusIds.cta} as any)}
+          accessibilityRole="switch"
+          accessibilityLabel="Auto restart mirror"
+          accessibilityState={{disabled: enabled || busy, checked: autoRestart}}
           onPress={() => toggleAutoRestart(!autoRestart)}
           style={({focused, pressed}: PressableFocusState) => [
             styles.settingRow,
@@ -154,6 +209,11 @@ export default function App() {
 
         <Pressable
           disabled={!canToggle || busy || loading}
+          ref={ctaRef}
+          {...({nextFocusUp: focusIds.restart} as any)}
+          accessibilityRole="button"
+          accessibilityLabel={enabled ? 'Stop mirror' : 'Start mirror'}
+          accessibilityState={{disabled: !canToggle || busy || loading}}
           onPress={toggleMirror}
           style={({focused, pressed}: PressableFocusState) => [
             styles.button,
@@ -188,26 +248,36 @@ export default function App() {
 }
 
 function DeviceCard({
+  pressableRef,
   title,
   device,
   selected,
   preferredFocus,
+  tvFocus,
   onPress,
 }: {
+  pressableRef?: React.Ref<View>;
   title: string;
   device: InputDevice | null;
   selected: boolean;
   preferredFocus?: boolean;
+  tvFocus?: TvFocusProps;
   onPress: () => void;
 }) {
   return (
     <Pressable
+      ref={pressableRef}
       focusable
       hasTVPreferredFocus={preferredFocus}
+      {...(tvFocus as any)}
+      accessibilityRole="button"
+      accessibilityLabel={`${title}. ${device?.name ?? 'No device selected'}`}
+      accessibilityState={{selected}}
       onPress={onPress}
       style={({focused}: PressableFocusState) => [styles.card, selected && styles.cardSelected, focused && styles.focused]}>
       <IconDeviceGamepad2 color="#61718a" size={40} strokeWidth={2.2} style={styles.gamepadIcon} />
       <Text style={styles.cardTitle}>{title}</Text>
+      <Text style={styles.cardHint}>Tap to choose</Text>
       <Text numberOfLines={1} style={device ? styles.cardDevice : styles.cardEmpty}>
         {device?.name ?? 'No device'}
       </Text>
@@ -243,6 +313,9 @@ function DeviceModal({
                   key={device.path}
                   focusable
                   hasTVPreferredFocus={index === 0}
+                  accessibilityRole="button"
+                  accessibilityLabel={device.name}
+                  accessibilityState={{selected}}
                   onPress={() => onSelect(device)}
                   style={({focused}: PressableFocusState) => [styles.option, focused && styles.optionFocused]}>
                   <View style={[styles.radio, selected && styles.radioSelected]}>
@@ -267,22 +340,22 @@ function DeviceModal({
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: '#0b0c0e',
+    backgroundColor: palette.screen,
   },
   scroller: {
     flex: 1,
   },
   container: {
     flexGrow: 1,
-    paddingHorizontal: 22,
-    paddingTop: 28,
-    paddingBottom: 36,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
+    paddingBottom: spacing.xxxl,
   },
   header: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 34,
+    marginBottom: 24,
   },
   titleRow: {
     alignItems: 'center',
@@ -290,84 +363,102 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   title: {
-    color: '#f4f7fb',
-    fontSize: 24,
+    color: palette.textPrimary,
+    fontSize: 26,
     fontWeight: '700',
+    letterSpacing: 0.2,
   },
   status: {
-    borderRadius: 7,
+    borderRadius: radius.pill,
     fontSize: 12,
     fontWeight: '800',
     overflow: 'hidden',
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingHorizontal: 14,
+    paddingVertical: spacing.sm,
   },
   statusOn: {
-    backgroundColor: '#0f3850',
-    color: '#58c7ff',
+    backgroundColor: palette.accentSoft,
+    color: palette.accent,
   },
   statusOff: {
-    backgroundColor: '#3b1719',
-    color: '#ff7878',
+    backgroundColor: palette.dangerSoft,
+    color: palette.danger,
+  },
+  sectionHeader: {
+    marginBottom: spacing.md,
+  },
+  sectionTitle: {
+    color: palette.textPrimary,
+    fontSize: 17,
+    fontWeight: '700',
+    marginBottom: 4,
   },
   subtitle: {
-    color: '#8fa0bc',
+    color: palette.textSecondary,
     fontSize: 14,
-    marginBottom: 12,
+    lineHeight: 20,
   },
   grid: {
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 28,
+    gap: 10,
+    marginBottom: spacing.xl,
   },
   card: {
     alignItems: 'center',
-    backgroundColor: '#1a1b22',
-    borderColor: '#2c2f3b',
-    borderRadius: 12,
+    backgroundColor: palette.surface,
+    borderColor: palette.border,
+    borderRadius: radius.md,
     borderWidth: 1,
     flex: 1,
-    height: 150,
+    minHeight: 164,
     justifyContent: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
+    paddingVertical: spacing.md,
   },
   cardSelected: {
-    borderColor: '#6b86ad',
+    borderColor: palette.borderStrong,
+    backgroundColor: palette.surfaceRaised,
   },
   focused: {
-    borderColor: '#9ec5ff',
-    backgroundColor: '#202331',
+    borderColor: '#8ec2ff',
+    backgroundColor: '#1e2a3c',
   },
   gamepadIcon: {
     marginBottom: 14,
   },
   cardTitle: {
-    color: '#a8c8f3',
+    color: '#c8dcfa',
     fontSize: 13,
     fontWeight: '700',
-    marginBottom: 16,
+    marginBottom: 4,
+  },
+  cardHint: {
+    color: palette.textMuted,
+    fontSize: 11,
+    marginBottom: 12,
   },
   cardEmpty: {
-    color: '#58647a',
+    color: palette.textMuted,
     fontSize: 12,
   },
   cardDevice: {
-    color: '#d9e6f8',
+    color: palette.textPrimary,
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
     maxWidth: '100%',
+    textAlign: 'center',
   },
   settingRow: {
     alignItems: 'center',
-    backgroundColor: '#1a1b22',
-    borderColor: '#2c2f3b',
-    borderRadius: 12,
+    backgroundColor: palette.surface,
+    borderColor: palette.border,
+    borderRadius: radius.md,
     borderWidth: 1,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 24,
-    minHeight: 66,
-    paddingHorizontal: 16,
+    marginBottom: spacing.md,
+    minHeight: 74,
+    paddingHorizontal: spacing.lg,
   },
   settingDisabled: {
     opacity: 0.62,
@@ -377,52 +468,52 @@ const styles = StyleSheet.create({
     paddingRight: 16,
   },
   settingTitle: {
-    color: '#f3f6fb',
+    color: palette.textPrimary,
     fontSize: 14,
     fontWeight: '800',
-    marginBottom: 5,
+    marginBottom: 4,
   },
   settingDescription: {
-    color: '#74839a',
+    color: palette.textSecondary,
     fontSize: 12,
+    lineHeight: 17,
   },
   button: {
     alignItems: 'center',
-    borderColor: '#4a4b51',
-    borderRadius: 7,
+    borderColor: palette.borderStrong,
+    borderRadius: radius.sm,
     borderWidth: 1,
     justifyContent: 'center',
     marginBottom: 16,
-    minHeight: 44,
-    paddingVertical: 10,
+    minHeight: 52,
+    paddingVertical: 12,
   },
   buttonStart: {
-    backgroundColor: 'transparent',
+    backgroundColor: '#11486a',
   },
   buttonStop: {
-    backgroundColor: '#3d1618',
-    borderColor: '#723033',
+    backgroundColor: '#56232b',
+    borderColor: '#8f3f4a',
   },
   buttonDisabled: {
-    backgroundColor: '#0b3f5f',
-    borderColor: '#0f4e75',
-    opacity: 0.68,
+    opacity: 0.5,
   },
   buttonPressed: {
     opacity: 0.82,
   },
   buttonText: {
-    color: '#f7fbff',
-    fontSize: 14,
+    color: palette.textPrimary,
+    fontSize: 15,
     fontWeight: '800',
+    letterSpacing: 0.2,
   },
   message: {
-    color: '#8fa0bc',
+    color: palette.textSecondary,
     fontSize: 14,
     lineHeight: 20,
   },
   hint: {
-    color: '#5f6d83',
+    color: palette.textMuted,
     fontSize: 12,
     lineHeight: 18,
     marginTop: 6,
@@ -435,19 +526,19 @@ const styles = StyleSheet.create({
     padding: 22,
   },
   modal: {
-    backgroundColor: '#1d1e27',
-    borderColor: '#303343',
-    borderRadius: 12,
+    backgroundColor: '#1a2230',
+    borderColor: palette.border,
+    borderRadius: radius.md,
     borderWidth: 1,
     maxHeight: 280,
     paddingHorizontal: 24,
     paddingVertical: 20,
     width: '100%',
-    maxWidth: 258,
+    maxWidth: 290,
   },
   modalTitle: {
-    color: '#91a0bc',
-    fontSize: 14,
+    color: palette.textPrimary,
+    fontSize: 15,
     fontWeight: '800',
     marginBottom: 14,
   },
@@ -465,7 +556,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
   },
   optionFocused: {
-    backgroundColor: '#282b39',
+    backgroundColor: '#253246',
   },
   radio: {
     alignItems: 'center',
@@ -478,28 +569,28 @@ const styles = StyleSheet.create({
     width: 20,
   },
   radioSelected: {
-    borderColor: '#8fb3e9',
+    borderColor: palette.accent,
   },
   radioDot: {
-    backgroundColor: '#8fb3e9',
+    backgroundColor: palette.accent,
     borderRadius: 5,
     height: 10,
     width: 10,
   },
   optionText: {
-    borderBottomColor: '#2e3140',
+    borderBottomColor: '#33445f',
     borderBottomWidth: 1,
     flex: 1,
     paddingBottom: 10,
     paddingTop: 10,
   },
   optionName: {
-    color: '#f3f6fb',
+    color: palette.textPrimary,
     fontSize: 14,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   emptyModal: {
-    color: '#74839a',
+    color: palette.textSecondary,
     fontSize: 13,
     lineHeight: 18,
     paddingVertical: 12,

@@ -114,12 +114,7 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     fun setAutoRestartEnabled(enabled: Boolean, promise: Promise) {
         try {
             graph.setAutoRestartEnabled(enabled)
-            val settings = graph.settingsRepository.getSettings()
-            if (enabled && settings.expectedRunning) {
-                startSupervisor()
-            } else {
-                stopSupervisor()
-            }
+            stopSupervisor()
             promise.resolve(enabled)
         } catch (error: Exception) {
             promise.reject("SAVE_SETTING_FAILED", error.message, error)
