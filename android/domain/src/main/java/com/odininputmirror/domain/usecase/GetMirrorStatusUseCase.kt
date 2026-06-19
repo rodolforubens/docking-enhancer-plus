@@ -1,12 +1,14 @@
 package com.odininputmirror.domain.usecase
 
 import com.odininputmirror.domain.model.MirrorStatus
+import com.odininputmirror.domain.repository.DockStateRepository
 import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 
 class GetMirrorStatusUseCase(
     private val mirrorProcessRepository: MirrorProcessRepository,
     private val mirrorSettingsRepository: MirrorSettingsRepository,
+    private val dockStateRepository: DockStateRepository,
 ) {
     operator fun invoke(verifyWithRoot: Boolean = false): MirrorStatus {
         val running = if (verifyWithRoot) {
@@ -30,6 +32,7 @@ class GetMirrorStatusUseCase(
             comboHoldKillApp = settings.comboHoldKillApp,
             autoRestart = settings.autoRestart,
             autoMirrorEnabled = settings.autoMirrorEnabled,
+            docked = dockStateRepository.isDockActive(),
         )
     }
 }

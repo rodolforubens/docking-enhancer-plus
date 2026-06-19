@@ -36,5 +36,6 @@ internal fun MirrorStatus.toWritableMap(): WritableMap {
     status.putBoolean("comboHoldKillApp", comboHoldKillApp)
     status.putBoolean("autoRestart", autoRestart)
     status.putBoolean("autoMirrorEnabled", autoMirrorEnabled)
+    status.putBoolean("docked", docked)
     return status
 }

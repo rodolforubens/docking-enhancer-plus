@@ -37,6 +37,15 @@
 - `npm run android` may fail on install with `Failed to parse APK file` / `avc ... Permission denied` even when build succeeds.
 - Fallback install command: `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`.
 
+## Development install flow on Odin
+- For normal iteration, use Metro. Do not generate or rely on an embedded `index.android.bundle` unless the user explicitly asks for an offline/release-style APK.
+- If the user asks to install/open the current app on Odin, first ensure Metro is running with `npm start`; if needed, start it in the background, then run `npm run android`.
+- If `npm run android` reports that a dev server is already running on port `8081`, continue; that is the desired development setup.
+- Avoid stopping Metro or switching to a bundled JS install just to hide console output. The Odin should load the latest JS from Metro during development.
+- If native Kotlin/Android code changed, `npm run android` is still needed after Metro is running so Gradle rebuilds and reinstalls the APK.
+- If only JS/TS changed and the app is already installed/open with Metro connected, a reload may be enough; reinstall only when needed.
+- If install fails after a successful build, use the fallback `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`, then launch `com.odininputmirror/.MainActivity`.
+
 ## Agent-local files
 - `.agents/` and `skills-lock.json` are intentionally gitignored; do not re-add them to tracking.
 

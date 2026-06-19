@@ -8,17 +8,21 @@ import java.io.File
 
 internal class AndroidInputDeviceRepository(
     private val shell: Shell = Shell(),
+    private val pathExists: (String) -> Boolean = { File(it).exists() },
 ) : InputDeviceRepository {
     override fun getConnectedControllers(): List<ControllerDevice> {
         val procEntries = shell.runShell("cat /proc/bus/input/devices")
             .split(Regex("\\n\\s*\\n"))
             .mapNotNull { parseProcInputBlock(it) }
 
+        val mirroredNames = computeMirroredNames(procEntries)
+
         return InputDevice.getDeviceIds()
             .asSequence()
             .mapNotNull { id -> InputDevice.getDevice(id) }
             .filter { device -> isPhysicalGameController(device) }
-            .mapNotNull { controller -> findProcEntryForController(controller, procEntries) }
+            .map { it.toCandidate() }
+            .mapNotNull { candidate -> resolveControllerDevice(candidate, procEntries, mirroredNames) }
             .distinctBy { it.path }
             .sortedBy { it.controllerNumber }
             .toList()
@@ -30,7 +34,65 @@ internal class AndroidInputDeviceRepository(
         devices: List<ControllerDevice>,
     ): ControllerDevice? = devices.findSavedControllerDevice(path = path, guid = guid)
 
-    private fun parseProcInputBlock(block: String): ProcInputEntry? {
+    // The Odin OS mirrors any active controller (internal or external) as a virtual HID node
+    // carrying Odin's own vendor/product id, for game-compatibility reasons. Such a mirrored
+    // node always has a "twin" proc entry with the same name on a real, non-Odin vendor id
+    // (e.g. the actual Bluetooth identity). The genuine internal controller has no such twin,
+    // so this distinguishes it from a mirrored external controller.
+    internal fun computeMirroredNames(procEntries: List<ProcInputEntry>): Set<String> =
+        procEntries
+            .filter { it.vendorId != ODIN_VENDOR_ID }
+            .map { it.name.lowercase() }
+            .toSet()
+
+    internal fun resolveControllerDevice(
+        candidate: ControllerCandidate,
+        entries: List<ProcInputEntry>,
+        mirroredNames: Set<String>,
+    ): ControllerDevice? {
+        val normalizedName = candidate.name.lowercase()
+        val candidates = entries.filter { entry ->
+            if (!pathExists(entry.path)) {
+                return@filter false
+            }
+
+            val sameVendorProduct =
+                candidate.vendorId != 0 &&
+                    candidate.productId != 0 &&
+                    candidate.vendorId != ODIN_VENDOR_ID &&
+                    entry.vendorId != ODIN_VENDOR_ID &&
+                    entry.vendorId == candidate.vendorId &&
+                    entry.productId == candidate.productId
+            val sameName = entry.name.lowercase() == normalizedName
+            sameVendorProduct || sameName
+        }
+
+        return candidates
+            .sortedWith(
+                compareByDescending<ProcInputEntry> {
+                    candidate.vendorId != ODIN_VENDOR_ID &&
+                        it.vendorId == candidate.vendorId &&
+                        it.productId == candidate.productId
+                }
+                    .thenByDescending { it.bus == BUS_BLUETOOTH }
+                    .thenByDescending { it.bus == BUS_USB && it.vendorId != ODIN_VENDOR_ID }
+                    .thenBy { it.isOdinInternalController }
+                    .thenBy { it.eventNumber }
+            )
+            .firstOrNull()
+            ?.let { entry ->
+                ControllerDevice(
+                    name = entry.name,
+                    path = entry.path,
+                    guid = candidate.guid,
+                    controllerNumber = candidate.controllerNumber,
+                    handlers = entry.handlers,
+                    isOdinInternal = entry.isOdinInternalController && entry.name.lowercase() !in mirroredNames,
+                )
+            }
+    }
+
+    internal fun parseProcInputBlock(block: String): ProcInputEntry? {
         val identityMatch = Regex("I: Bus=([0-9A-Fa-f]+) Vendor=([0-9A-Fa-f]+) Product=([0-9A-Fa-f]+)")
             .find(block)
             ?: return null
@@ -47,52 +109,6 @@ internal class AndroidInputDeviceRepository(
             vendorId = identityMatch.groupValues[2].toInt(16),
             productId = identityMatch.groupValues[3].toInt(16),
         )
-    }
-
-    private fun findProcEntryForController(
-        controller: InputDevice,
-        entries: List<ProcInputEntry>,
-    ): ControllerDevice? {
-        val normalizedName = controller.name.lowercase()
-        val candidates = entries.filter { entry ->
-            if (!File(entry.path).exists()) {
-                return@filter false
-            }
-
-            val sameVendorProduct =
-                controller.vendorId != 0 &&
-                    controller.productId != 0 &&
-                    controller.vendorId != ODIN_VENDOR_ID &&
-                    entry.vendorId != ODIN_VENDOR_ID &&
-                    entry.vendorId == controller.vendorId &&
-                    entry.productId == controller.productId
-            val sameName = entry.name.lowercase() == normalizedName
-            sameVendorProduct || sameName
-        }
-
-        return candidates
-            .sortedWith(
-                compareByDescending<ProcInputEntry> {
-                    controller.vendorId != ODIN_VENDOR_ID &&
-                        it.vendorId == controller.vendorId &&
-                        it.productId == controller.productId
-                }
-                    .thenByDescending { it.bus == BUS_BLUETOOTH }
-                    .thenByDescending { it.bus == BUS_USB && it.vendorId != ODIN_VENDOR_ID }
-                    .thenBy { it.isOdinInternalController }
-                    .thenBy { it.eventNumber }
-            )
-            .firstOrNull()
-            ?.let { entry ->
-                ControllerDevice(
-                    name = entry.name,
-                    path = entry.path,
-                    guid = controller.getGuid(),
-                    controllerNumber = controller.controllerNumber,
-                    handlers = entry.handlers,
-                    isOdinInternal = entry.isOdinInternalController,
-                )
-            }
     }
 
     private fun isPhysicalGameController(device: InputDevice?): Boolean {
@@ -112,7 +128,7 @@ internal class AndroidInputDeviceRepository(
         return hasControllerButtons || hasControllerAxes
     }
 
-    private data class ProcInputEntry(
+    internal data class ProcInputEntry(
         val name: String,
         val handlers: List<String>,
         val path: String,
@@ -127,9 +143,25 @@ internal class AndroidInputDeviceRepository(
         val isOdinInternalController: Boolean
             get() = bus == BUS_USB &&
                 vendorId == ODIN_VENDOR_ID &&
-                productId == ODIN_INTERNAL_CONTROLLER_PRODUCT_ID
+                productId in ODIN_INTERNAL_CONTROLLER_PRODUCT_IDS
     }
 }
+
+internal data class ControllerCandidate(
+    val name: String,
+    val vendorId: Int,
+    val productId: Int,
+    val controllerNumber: Int,
+    val guid: String,
+)
+
+private fun InputDevice.toCandidate(): ControllerCandidate = ControllerCandidate(
+    name = name,
+    vendorId = vendorId,
+    productId = productId,
+    controllerNumber = controllerNumber,
+    guid = getGuid(),
+)
 
 private fun InputDevice.getGuid(): String = String.format("%016x%016x", productId, vendorId)
 

@@ -48,6 +48,7 @@ export default function App() {
     homeAsBack,
     comboHoldKillApp,
     restartWaiting,
+    docked,
     toggleAutoMirrorEnabled,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
@@ -80,9 +81,14 @@ export default function App() {
             <Text style={styles.title}>Docking Enhancer</Text>
             {loading && <ActivityIndicator color="#87a7d7" size="small" />}
           </View>
-          <Text style={[styles.status, enabled ? styles.statusOn : styles.statusOff]}>
-            {enabled ? 'ACTIVE' : 'INACTIVE'}
-          </Text>
+          <View style={styles.statusRow}>
+            <Text style={[styles.status, enabled ? styles.statusOn : styles.statusOff]}>
+              {enabled ? 'ACTIVE' : 'INACTIVE'}
+            </Text>
+            <Text style={[styles.status, docked ? styles.statusOn : styles.statusOff]}>
+              {docked ? 'DOCKED' : 'UNDOCKED'}
+            </Text>
+          </View>
         </View>
 
         <View style={styles.sectionHeader}>
@@ -259,6 +265,10 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    gap: 8,
   },
   status: {
     borderRadius: radius.pill,

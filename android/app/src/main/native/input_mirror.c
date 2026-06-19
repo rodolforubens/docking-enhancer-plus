@@ -16,6 +16,43 @@ static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
 static const long long HEARTBEAT_INTERVAL_MS = 1000;
 
+/*
+ * In Odin mode we remap the four face buttons of a mirrored external controller to the
+ * Nintendo layout the console uses by default: A and B (south/east) are swapped, and X and Y
+ * (north/west) are swapped, so the physically-labelled button acts as its label rather than
+ * its Xbox-position equivalent. This is keyed off the target device's USB id, so Xbox mode
+ * (product 0x0112) passes through untouched.
+ */
+#ifndef BTN_SOUTH
+#define BTN_SOUTH 0x130
+#endif
+#ifndef BTN_EAST
+#define BTN_EAST 0x131
+#endif
+#ifndef BTN_NORTH
+#define BTN_NORTH 0x133
+#endif
+#ifndef BTN_WEST
+#define BTN_WEST 0x134
+#endif
+#define ODIN_VENDOR_ID 0x2020
+#define ODIN_NINTENDO_PRODUCT_ID 0x0111
+
+static unsigned short swap_nintendo_face_button(unsigned short code) {
+    switch (code) {
+        case BTN_SOUTH:
+            return BTN_EAST;
+        case BTN_EAST:
+            return BTN_SOUTH;
+        case BTN_NORTH:
+            return BTN_WEST;
+        case BTN_WEST:
+            return BTN_NORTH;
+        default:
+            return code;
+    }
+}
+
 static void handle_signal(int signal_number) {
     (void)signal_number;
     keep_running = 0;
@@ -194,11 +231,19 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    int target_fd = open(target_path, O_WRONLY | O_CLOEXEC);
+    int target_fd = open(target_path, O_RDWR | O_CLOEXEC);
     if (target_fd < 0) {
         fprintf(stderr, "Failed to open target %s: %s\n", target_path, strerror(errno));
         close(source_fd);
         return EXIT_FAILURE;
+    }
+
+    int swap_nintendo_layout = 0;
+    struct input_id target_id;
+    if (ioctl(target_fd, EVIOCGID, &target_id) == 0) {
+        swap_nintendo_layout =
+            target_id.vendor == ODIN_VENDOR_ID &&
+            target_id.product == ODIN_NINTENDO_PRODUCT_ID;
     }
 
     if (ioctl(source_fd, EVIOCGRAB, 1) < 0) {
@@ -337,6 +382,10 @@ int main(int argc, char **argv) {
                     combo_pressed_at_ms = 0;
                 }
             }
+        }
+
+        if (swap_nintendo_layout && event.type == EV_KEY) {
+            event.code = swap_nintendo_face_button(event.code);
         }
 
         if (write_full(target_fd, &event, sizeof(event)) != 0) {

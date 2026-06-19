@@ -38,7 +38,7 @@ internal val CONTROLLER_AXES = intArrayOf(
 internal const val BUS_USB = 0x0003
 internal const val BUS_BLUETOOTH = 0x0005
 internal const val ODIN_VENDOR_ID = 0x2020
-internal const val ODIN_INTERNAL_CONTROLLER_PRODUCT_ID = 0x0112
+internal val ODIN_INTERNAL_CONTROLLER_PRODUCT_IDS = setOf(0x0111, 0x0112)
 
 internal const val PREFS = "input_mirror"
 internal const val KEY_SOURCE = "source"

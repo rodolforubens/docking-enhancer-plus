@@ -13,6 +13,8 @@ android/local.properties
 android/.gradle/
 android/build/
 android/app/build/
+android/keystore.properties
+android/app/release.keystore
 
 # Android generated packages and reports
 *.apk

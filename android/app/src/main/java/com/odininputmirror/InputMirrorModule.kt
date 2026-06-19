@@ -68,15 +68,6 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun isMirrorRunning(promise: Promise) {
-        try {
-            promise.resolve(graph.getMirrorStatus().running)
-        } catch (_: Exception) {
-            promise.resolve(false)
-        }
-    }
-
-    @ReactMethod
     fun getMirrorStatus(promise: Promise) {
         try {
             promise.resolve(graph.getMirrorStatus().toWritableMap())

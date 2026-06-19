@@ -10,8 +10,13 @@ android {
     defaultConfig {
         minSdk 23
     }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     implementation project(":domain")
+    testImplementation "junit:junit:4.13.2"
 }

@@ -1,7 +1,13 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {AppState, InteractionManager} from 'react-native';
 import {inputMirrorClient} from './inputMirrorClient';
 import type {InputDevice, MirrorStatus} from './types';
+
+// Poll fast while a state change is imminent (waiting for a controller, or for the mirror to
+// start/stop), and back off once the mirror is running steadily, where nothing changes between
+// ticks — this avoids draining the handheld battery with a constant 2s cadence.
+const ACTIVE_POLL_MS = 2000;
+const IDLE_POLL_MS = 6000;
 
 export function useMirrorController() {
   const [devices, setDevices] = useState<InputDevice[]>([]);
@@ -15,6 +21,18 @@ export function useMirrorController() {
   const [comboHoldKillApp, setComboHoldKillApp] = useState(false);
   const [autoMirrorEnabled, setAutoMirrorEnabled] = useState(true);
   const [restartWaiting, setRestartWaiting] = useState(false);
+  const [docked, setDocked] = useState(false);
+
+  // refreshDevices/refreshMirrorState/initialLoad can be triggered concurrently (AppState
+  // change + the 2s poll interval). Each call claims the next id before awaiting, and only
+  // applies its result if no newer call has started in the meantime, so a slow, stale
+  // response can never overwrite state from a request that started later.
+  const latestRequestId = useRef(0);
+
+  // Desired poll cadence, read by the self-scheduling poll loop on each tick. Kept in a ref so
+  // changing the cadence does not tear down and recreate the AppState listener / poll loop.
+  const pollDelayRef = useRef(ACTIVE_POLL_MS);
+  pollDelayRef.current = enabled && !restartWaiting ? IDLE_POLL_MS : ACTIVE_POLL_MS;
 
   const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
     setEnabled(Boolean(status.running));
@@ -22,22 +40,33 @@ export function useMirrorController() {
     setComboHoldKillApp(Boolean(status.comboHoldKillApp));
     setAutoMirrorEnabled(status.autoMirrorEnabled !== false);
     setRestartWaiting(Boolean(status.expectedRunning && !status.running));
+    setDocked(Boolean(status.docked));
 
     const autoLocal = availableDevices.find(device => device.isOdinInternal) ?? null;
     const autoExternal = availableDevices.find(device => !device.isOdinInternal) ?? null;
+    const savedExternalIsLocal = autoLocal
+      ? savedIdentityMatchesDevice(status.source, status.sourceGuid, autoLocal)
+      : false;
 
     setLocalDevice(autoLocal ?? deviceFromSavedIdentity(status.target, status.targetGuid, availableDevices, 'Saved Odin controller'));
     setExternalDevice(
-      autoExternal ?? deviceFromSavedIdentity(status.source, status.sourceGuid, availableDevices, 'Waiting for external controller'),
+      autoExternal ??
+        (savedExternalIsLocal
+          ? null
+          : deviceFromSavedIdentity(status.source, status.sourceGuid, availableDevices, 'Waiting for external controller')),
     );
   }, []);
 
   const refreshDevices = useCallback(
     async (verifyWithRoot = false) => {
+      const requestId = ++latestRequestId.current;
       const [result, status] = await Promise.all([
         inputMirrorClient.getConnectedDevices(),
         verifyWithRoot ? inputMirrorClient.getMirrorStatusVerified() : inputMirrorClient.getMirrorStatus(),
       ]);
+      if (requestId !== latestRequestId.current) {
+        return;
+      }
       setDevices(result);
       applyMirrorStatus(status, result);
       setMessage(buildStatusMessage(status, result));
@@ -46,7 +75,11 @@ export function useMirrorController() {
   );
 
   const refreshMirrorState = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     const [result, status] = await Promise.all([inputMirrorClient.getConnectedDevices(), inputMirrorClient.getMirrorStatus()]);
+    if (requestId !== latestRequestId.current) {
+      return;
+    }
     setDevices(result);
     applyMirrorStatus(status, result);
     setMessage(buildStatusMessage(status, result));
@@ -56,9 +89,10 @@ export function useMirrorController() {
     let mounted = true;
 
     async function initialLoad() {
+      const requestId = ++latestRequestId.current;
       try {
         const [result, status] = await Promise.all([inputMirrorClient.getConnectedDevices(), inputMirrorClient.getMirrorStatus()]);
-        if (!mounted) {
+        if (!mounted || requestId !== latestRequestId.current) {
           return;
         }
 
@@ -88,15 +122,20 @@ export function useMirrorController() {
       }
     });
 
-    const interval = setInterval(() => {
-      if (AppState.currentState === 'active') {
-        refreshMirrorState().catch(() => undefined);
-      }
-    }, 2000);
+    let timeout: ReturnType<typeof setTimeout>;
+    const scheduleNext = () => {
+      timeout = setTimeout(async () => {
+        if (AppState.currentState === 'active') {
+          await refreshMirrorState().catch(() => undefined);
+        }
+        scheduleNext();
+      }, pollDelayRef.current);
+    };
+    scheduleNext();
 
     return () => {
       subscription.remove();
-      clearInterval(interval);
+      clearTimeout(timeout);
     };
   }, [refreshDevices, refreshMirrorState]);
 
@@ -159,6 +198,7 @@ export function useMirrorController() {
     comboHoldKillApp,
     autoMirrorEnabled,
     restartWaiting,
+    docked,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
     toggleAutoMirrorEnabled,
@@ -202,6 +242,10 @@ function findDeviceBySavedIdentity(path: string | null | undefined, guid: string
   }
 
   return null;
+}
+
+function savedIdentityMatchesDevice(path: string | null | undefined, guid: string | null | undefined, device: InputDevice) {
+  return Boolean((guid && device.guid === guid) || (path && device.path === path));
 }
 
 function deviceFromSavedIdentity(

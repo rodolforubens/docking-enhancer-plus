@@ -11,4 +11,5 @@ data class MirrorStatus(
     val comboHoldKillApp: Boolean,
     val autoRestart: Boolean,
     val autoMirrorEnabled: Boolean,
+    val docked: Boolean,
 )

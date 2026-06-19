@@ -18,6 +18,7 @@ export type MirrorStatus = {
   comboHoldKillApp?: boolean;
   autoRestart?: boolean;
   autoMirrorEnabled?: boolean;
+  docked?: boolean;
 };
 
 export type Slot = 'local' | 'external';

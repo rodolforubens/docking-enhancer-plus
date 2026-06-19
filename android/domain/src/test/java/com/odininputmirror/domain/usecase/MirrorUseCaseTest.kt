@@ -4,6 +4,7 @@ import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.model.findSavedControllerDevice
+import com.odininputmirror.domain.repository.DockStateRepository
 import com.odininputmirror.domain.repository.InputDeviceRepository
 import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
@@ -89,7 +90,7 @@ class MirrorUseCaseTest {
             ),
         )
 
-        val status = GetMirrorStatusUseCase(process, settings)()
+        val status = GetMirrorStatusUseCase(process, settings, FakeDockStateRepository(docked = true))()
 
         assertTrue(status.running)
         assertTrue(status.expectedRunning)
@@ -100,6 +101,7 @@ class MirrorUseCaseTest {
         assertTrue(status.homeAsBack)
         assertFalse(status.comboHoldKillApp)
         assertTrue(status.autoRestart)
+        assertTrue(status.docked)
         assertEquals(1, process.isRunningCount)
         assertEquals(0, process.isRunningVerifiedCount)
     }
@@ -109,7 +111,7 @@ class MirrorUseCaseTest {
         val process = FakeMirrorProcessRepository(running = true, verifiedRunning = false)
         val settings = FakeMirrorSettingsRepository(MirrorSettings(expectedRunning = true))
 
-        val status = GetMirrorStatusUseCase(process, settings)(verifyWithRoot = true)
+        val status = GetMirrorStatusUseCase(process, settings, FakeDockStateRepository())(verifyWithRoot = true)
 
         assertFalse(status.running)
         assertEquals(0, process.isRunningCount)
@@ -587,6 +589,12 @@ private class FakeMirrorSettingsRepository(
     override fun setAutoMirrorEnabled(enabled: Boolean) {
         state = state.copy(autoMirrorEnabled = enabled)
     }
+}
+
+private class FakeDockStateRepository(
+    private val docked: Boolean = false,
+) : DockStateRepository {
+    override fun isDockActive(): Boolean = docked
 }
 
 private class FakeInputDeviceRepository(
