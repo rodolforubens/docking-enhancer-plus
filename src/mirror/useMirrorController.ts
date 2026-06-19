@@ -1,38 +1,34 @@
-import {useCallback, useEffect, useMemo, useState} from 'react';
+import {useCallback, useEffect, useState} from 'react';
 import {AppState, InteractionManager} from 'react-native';
 import {inputMirrorClient} from './inputMirrorClient';
-import type {InputDevice, MirrorStatus, Slot} from './types';
+import type {InputDevice, MirrorStatus} from './types';
 
 export function useMirrorController() {
   const [devices, setDevices] = useState<InputDevice[]>([]);
   const [localDevice, setLocalDevice] = useState<InputDevice | null>(null);
   const [externalDevice, setExternalDevice] = useState<InputDevice | null>(null);
-  const [activeSlot, setActiveSlot] = useState<Slot | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [homeAsBack, setHomeAsBack] = useState(false);
   const [comboHoldKillApp, setComboHoldKillApp] = useState(false);
-  const [autoRestart, setAutoRestart] = useState(false);
+  const [autoMirrorEnabled, setAutoMirrorEnabled] = useState(true);
   const [restartWaiting, setRestartWaiting] = useState(false);
 
   const applyMirrorStatus = useCallback((status: MirrorStatus, availableDevices: InputDevice[]) => {
-    const shouldShowEnabled = Boolean(status.running || (status.autoRestart && status.expectedRunning));
-    setEnabled(shouldShowEnabled);
+    setEnabled(Boolean(status.running));
     setHomeAsBack(Boolean(status.homeAsBack));
     setComboHoldKillApp(Boolean(status.comboHoldKillApp));
-    setAutoRestart(Boolean(status.autoRestart));
+    setAutoMirrorEnabled(status.autoMirrorEnabled !== false);
+    setRestartWaiting(Boolean(status.expectedRunning && !status.running));
 
-    if (!shouldShowEnabled) {
-      return;
-    }
+    const autoLocal = availableDevices.find(device => device.isOdinInternal) ?? null;
+    const autoExternal = availableDevices.find(device => !device.isOdinInternal) ?? null;
 
-    setExternalDevice(current =>
-      deviceFromSavedIdentity(status.source, status.sourceGuid, availableDevices, current, 'Saved external controller'),
-    );
-    setLocalDevice(current =>
-      deviceFromSavedIdentity(status.target, status.targetGuid, availableDevices, current, 'Saved local controller'),
+    setLocalDevice(autoLocal ?? deviceFromSavedIdentity(status.target, status.targetGuid, availableDevices, 'Saved Odin controller'));
+    setExternalDevice(
+      autoExternal ?? deviceFromSavedIdentity(status.source, status.sourceGuid, availableDevices, 'Waiting for external controller'),
     );
   }, []);
 
@@ -44,41 +40,31 @@ export function useMirrorController() {
       ]);
       setDevices(result);
       applyMirrorStatus(status, result);
-
-      if (!status.running) {
-        setLocalDevice(current => keepSelectedDevice(current, result));
-        setExternalDevice(current => keepSelectedDevice(current, result));
-      }
-
-      setMessage(result.length ? 'Controllers detected.' : 'No controllers detected.');
+      setMessage(buildStatusMessage(status, result));
     },
     [applyMirrorStatus],
   );
 
   const refreshMirrorState = useCallback(async () => {
-    const status = await inputMirrorClient.getMirrorStatus();
-    applyMirrorStatus(status, devices);
-    setRestartWaiting(Boolean(status.autoRestart && status.expectedRunning && !status.running));
-  }, [applyMirrorStatus, devices]);
+    const [result, status] = await Promise.all([inputMirrorClient.getConnectedDevices(), inputMirrorClient.getMirrorStatus()]);
+    setDevices(result);
+    applyMirrorStatus(status, result);
+    setMessage(buildStatusMessage(status, result));
+  }, [applyMirrorStatus]);
 
   useEffect(() => {
     let mounted = true;
 
     async function initialLoad() {
-      let loadedDevices: InputDevice[] = [];
       try {
-        const [result, status] = await Promise.all([
-          inputMirrorClient.getConnectedDevices(),
-          inputMirrorClient.getMirrorStatus(),
-        ]);
+        const [result, status] = await Promise.all([inputMirrorClient.getConnectedDevices(), inputMirrorClient.getMirrorStatus()]);
         if (!mounted) {
           return;
         }
 
-        loadedDevices = result;
         setDevices(result);
         applyMirrorStatus(status, result);
-        setMessage(result.length ? 'Controllers detected.' : 'No controllers detected.');
+        setMessage(buildStatusMessage(status, result));
       } catch (error) {
         setMessage(error instanceof Error ? error.message : String(error));
       } finally {
@@ -86,20 +72,6 @@ export function useMirrorController() {
           setLoading(false);
         }
       }
-
-      if (!mounted) {
-        return;
-      }
-
-      inputMirrorClient
-        .getMirrorStatus()
-        .then(status => {
-          if (mounted) {
-            applyMirrorStatus(status, loadedDevices);
-            setRestartWaiting(Boolean(status.autoRestart && status.expectedRunning && !status.running));
-          }
-        })
-        .catch(() => undefined);
     }
 
     const interactionTask = InteractionManager.runAfterInteractions(initialLoad);
@@ -127,43 +99,6 @@ export function useMirrorController() {
       clearInterval(interval);
     };
   }, [refreshDevices, refreshMirrorState]);
-
-  useEffect(() => {
-    if (activeSlot !== null) {
-      refreshDevices().catch(error => setMessage(error instanceof Error ? error.message : String(error)));
-    }
-  }, [activeSlot, refreshDevices]);
-
-  const canStart = useMemo(() => {
-    return Boolean(localDevice && externalDevice && localDevice.path !== externalDevice.path);
-  }, [localDevice, externalDevice]);
-  const canToggle = enabled || canStart;
-
-  const modalTitle = activeSlot === 'local' ? 'Local Controller' : 'External Controller';
-
-  function selectedDeviceFor(slot: Slot | null) {
-    if (slot === 'local') {
-      return localDevice;
-    }
-    if (slot === 'external') {
-      return externalDevice;
-    }
-    return null;
-  }
-
-  function selectDevice(device: InputDevice) {
-    if (activeSlot === 'local') {
-      setLocalDevice(device);
-    }
-    if (activeSlot === 'external') {
-      setExternalDevice(device);
-    }
-    setActiveSlot(null);
-  }
-
-  function openDeviceModal(slot: Slot) {
-    setActiveSlot(slot);
-  }
 
   async function toggleHomeAsBack(nextValue: boolean) {
     if (enabled || busy) {
@@ -193,55 +128,19 @@ export function useMirrorController() {
     }
   }
 
-  async function toggleAutoRestart(nextValue: boolean) {
-    if (enabled || busy) {
-      return;
-    }
-
-    setAutoRestart(nextValue);
-    if (!nextValue) {
-      setRestartWaiting(false);
-    }
-
-    try {
-      await inputMirrorClient.setAutoRestartEnabled(nextValue);
-    } catch (error) {
-      setAutoRestart(!nextValue);
-      setMessage(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function toggleMirror() {
-    if (!canToggle || busy) {
+  async function toggleAutoMirrorEnabled(nextValue: boolean) {
+    if (busy) {
       return;
     }
 
     setBusy(true);
+    setAutoMirrorEnabled(nextValue);
     try {
-      if (enabled) {
-        await inputMirrorClient.stopMirror();
-        setEnabled(false);
-        setMessage('Mirror stopped.');
-      } else {
-        if (!localDevice || !externalDevice) {
-          setMessage('Select different local and external controllers.');
-          return;
-        }
-
-        setEnabled(true);
-        setMessage('Mirror active.');
-        await inputMirrorClient.startMirror(
-          externalDevice.path,
-          localDevice.path,
-          homeAsBack,
-          comboHoldKillApp,
-          externalDevice.guid ?? null,
-          localDevice.guid ?? null,
-        );
-        setRestartWaiting(false);
-      }
+      await inputMirrorClient.setAutoMirrorEnabled(nextValue);
+      setEnabled(current => (nextValue ? current : false));
+      setMessage(nextValue ? 'Automatic dock mirror is enabled.' : 'Automatic dock mirror is disabled.');
     } catch (error) {
-      setEnabled(false);
+      setAutoMirrorEnabled(!nextValue);
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -252,35 +151,42 @@ export function useMirrorController() {
     devices,
     localDevice,
     externalDevice,
-    activeSlot,
     enabled,
     loading,
     busy,
     message,
     homeAsBack,
     comboHoldKillApp,
-    autoRestart,
+    autoMirrorEnabled,
     restartWaiting,
-    canStart,
-    canToggle,
-    modalTitle,
-    openDeviceModal,
-    selectedDeviceFor,
-    selectDevice,
-    setActiveSlot,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
-    toggleAutoRestart,
-    toggleMirror,
+    toggleAutoMirrorEnabled,
   };
 }
 
-function keepSelectedDevice(current: InputDevice | null, devices: InputDevice[]) {
-  if (!current) {
-    return null;
+function buildStatusMessage(status: MirrorStatus, devices: InputDevice[]) {
+  if (status.running) {
+    return 'Dock mirror active.';
   }
 
-  return devices.find(device => device.path === current.path) ?? null;
+  if (status.autoMirrorEnabled === false) {
+    return 'Automatic dock mirror is disabled.';
+  }
+
+  if (!devices.some(device => device.isOdinInternal)) {
+    return 'Waiting for Odin internal controller.';
+  }
+
+  if (!devices.some(device => !device.isOdinInternal)) {
+    return 'Waiting for an external controller.';
+  }
+
+  if (status.expectedRunning) {
+    return 'Controller detected. Mirror will start automatically.';
+  }
+
+  return 'Automatic dock mirror is ready.';
 }
 
 function findDeviceBySavedIdentity(path: string | null | undefined, guid: string | null | undefined, devices: InputDevice[]) {
@@ -302,16 +208,11 @@ function deviceFromSavedIdentity(
   path: string | null | undefined,
   guid: string | null | undefined,
   devices: InputDevice[],
-  current: InputDevice | null,
   fallbackName: string,
 ) {
   const found = findDeviceBySavedIdentity(path, guid, devices);
   if (found) {
     return found;
-  }
-
-  if (current && ((guid && current.guid === guid) || (path && current.path === path))) {
-    return current;
   }
 
   if (!path && !guid) {

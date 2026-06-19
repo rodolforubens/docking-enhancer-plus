@@ -292,6 +292,134 @@ class MirrorUseCaseTest {
         assertEquals("/dev/input/event2", settings.state.target)
     }
 
+    @Test
+    fun autoMirrorStopsWhenDockIsInactive() {
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = false,
+            devices = reconnectedControllers(),
+            settings = MirrorSettings(),
+            mirrorRunning = true,
+        )
+
+        assertEquals(AutoMirrorDecision.StopForDock, decision)
+    }
+
+    @Test
+    fun autoMirrorWaitsForInternalController() {
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(externalController()),
+            settings = MirrorSettings(),
+            mirrorRunning = false,
+        )
+
+        assertEquals(AutoMirrorDecision.WaitingForInternalController, decision)
+    }
+
+    @Test
+    fun autoMirrorWaitsForExternalController() {
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(localController()),
+            settings = MirrorSettings(),
+            mirrorRunning = false,
+        )
+
+        assertEquals(AutoMirrorDecision.WaitingForExternalController, decision)
+    }
+
+    @Test
+    fun autoMirrorIgnoresDuplicateInternalControllerEventAsExternal() {
+        val local = localController(controllerNumber = 1)
+        val duplicateInternalEvent = externalController(
+            path = "/dev/input/event8",
+            guid = "odin-mode-secondary-node",
+            controllerNumber = 1,
+        )
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, duplicateInternalEvent),
+            settings = MirrorSettings(),
+            mirrorRunning = false,
+        )
+
+        assertEquals(AutoMirrorDecision.WaitingForExternalController, decision)
+    }
+
+    @Test
+    fun autoMirrorStartsWithInternalTargetAndFirstExternalSource() {
+        val firstExternal = externalController(path = "/dev/input/event9", guid = "first-external")
+        val secondExternal = externalController(path = "/dev/input/event10", guid = "second-external")
+        val local = localController(path = "/dev/input/event2", guid = "odin-internal")
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, firstExternal, secondExternal),
+            settings = MirrorSettings(homeAsBack = true, comboHoldKillApp = true),
+            mirrorRunning = false,
+        )
+
+        assertEquals(
+            AutoMirrorDecision.Start(
+                mirrorRequest(
+                    source = "/dev/input/event9",
+                    target = "/dev/input/event2",
+                    sourceGuid = "first-external",
+                    targetGuid = "odin-internal",
+                    homeAsBack = true,
+                    comboHoldKillApp = true,
+                )
+            ),
+            decision,
+        )
+    }
+
+    @Test
+    fun autoMirrorKeepsRunningWhenSelectedDevicesMatch() {
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = reconnectedControllers(),
+            settings = restartableSettings().copy(
+                source = "/dev/input/event11",
+                target = "/dev/input/event4",
+            ),
+            mirrorRunning = true,
+        )
+
+        assertEquals(AutoMirrorDecision.Running, decision)
+    }
+
+    @Test
+    fun autoMirrorRestartsWhenExternalControllerChanges() {
+        val newExternal = externalController(path = "/dev/input/event12", guid = "new-external")
+        val local = localController(path = "/dev/input/event4", guid = "local-guid")
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, newExternal),
+            settings = restartableSettings().copy(
+                source = "/dev/input/event11",
+                target = "/dev/input/event4",
+            ),
+            mirrorRunning = true,
+        )
+
+        assertEquals(
+            AutoMirrorDecision.Restart(
+                mirrorRequest(
+                    source = "/dev/input/event12",
+                    target = "/dev/input/event4",
+                    sourceGuid = "new-external",
+                    targetGuid = "local-guid",
+                    homeAsBack = true,
+                    comboHoldKillApp = true,
+                )
+            ),
+            decision,
+        )
+    }
+
     private fun restartUseCase(
         settings: MirrorSettings,
         process: FakeMirrorProcessRepository = FakeMirrorProcessRepository(),
@@ -351,23 +479,26 @@ class MirrorUseCaseTest {
     private fun externalController(
         path: String = "/dev/input/event9",
         guid: String = "external-guid",
+        controllerNumber: Int = 2,
     ) = ControllerDevice(
         name = "External Controller",
         path = path,
         guid = guid,
-        controllerNumber = 2,
+        controllerNumber = controllerNumber,
         handlers = listOf("event${path.substringAfterLast("event")}"),
     )
 
     private fun localController(
         path: String = "/dev/input/event2",
         guid: String = "local-guid",
+        controllerNumber: Int = 1,
     ) = ControllerDevice(
         name = "Odin Controller",
         path = path,
         guid = guid,
-        controllerNumber = 1,
+        controllerNumber = controllerNumber,
         handlers = listOf("event${path.substringAfterLast("event")}"),
+        isOdinInternal = true,
     )
 }
 
@@ -451,6 +582,10 @@ private class FakeMirrorSettingsRepository(
 
     override fun setAutoRestartEnabled(enabled: Boolean) {
         state = state.copy(autoRestart = enabled)
+    }
+
+    override fun setAutoMirrorEnabled(enabled: Boolean) {
+        state = state.copy(autoMirrorEnabled = enabled)
     }
 }
 

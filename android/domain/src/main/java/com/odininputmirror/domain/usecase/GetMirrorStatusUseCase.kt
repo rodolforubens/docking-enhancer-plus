@@ -29,6 +29,7 @@ class GetMirrorStatusUseCase(
             homeAsBack = settings.homeAsBack,
             comboHoldKillApp = settings.comboHoldKillApp,
             autoRestart = settings.autoRestart,
+            autoMirrorEnabled = settings.autoMirrorEnabled,
         )
     }
 }

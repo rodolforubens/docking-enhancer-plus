@@ -20,9 +20,18 @@ android {
         targetSdk 35
         versionCode 1
         versionName "0.1.0"
+        buildConfigField "boolean", "FORCE_DOCK_MODE_FOR_DEV", "false"
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     buildTypes {
+        debug {
+            buildConfigField "boolean", "FORCE_DOCK_MODE_FOR_DEV", "true"
+        }
+
         release {
             signingConfig signingConfigs.debug
         }

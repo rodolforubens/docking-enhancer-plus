@@ -13,6 +13,10 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
     private val graph = InputMirrorGraph(reactContext)
 
+    init {
+        startSupervisor()
+    }
+
     override fun getName(): String = "InputMirror"
 
     @ReactMethod
@@ -36,7 +40,7 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
                     targetGuid = targetGuid,
                 )
             )
-            startSupervisorIfNeeded()
+            startSupervisor()
             promise.resolve("started")
         } catch (error: Exception) {
             promise.reject("START_FAILED", error.message, error)
@@ -114,16 +118,24 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
     fun setAutoRestartEnabled(enabled: Boolean, promise: Promise) {
         try {
             graph.setAutoRestartEnabled(enabled)
-            stopSupervisor()
             promise.resolve(enabled)
         } catch (error: Exception) {
             promise.reject("SAVE_SETTING_FAILED", error.message, error)
         }
     }
 
-    private fun startSupervisorIfNeeded() {
-        if (graph.settingsRepository.getSettings().autoRestart) {
-            startSupervisor()
+    @ReactMethod
+    fun setAutoMirrorEnabled(enabled: Boolean, promise: Promise) {
+        try {
+            graph.setAutoMirrorEnabled(enabled)
+            if (!enabled) {
+                graph.stopMirror()
+            } else {
+                startSupervisor()
+            }
+            promise.resolve(enabled)
+        } catch (error: Exception) {
+            promise.reject("SAVE_SETTING_FAILED", error.message, error)
         }
     }
 

@@ -17,6 +17,7 @@ type InputMirrorNative = {
   setHomeAsBackEnabled(enabled: boolean): Promise<boolean>;
   setComboHoldKillAppEnabled(enabled: boolean): Promise<boolean>;
   setAutoRestartEnabled(enabled: boolean): Promise<boolean>;
+  setAutoMirrorEnabled(enabled: boolean): Promise<boolean>;
 };
 
 const {InputMirror} = NativeModules as {InputMirror: InputMirrorNative};
@@ -37,4 +38,5 @@ export const inputMirrorClient = {
   setHomeAsBackEnabled: (enabled: boolean) => InputMirror.setHomeAsBackEnabled(enabled),
   setComboHoldKillAppEnabled: (enabled: boolean) => InputMirror.setComboHoldKillAppEnabled(enabled),
   setAutoRestartEnabled: (enabled: boolean) => InputMirror.setAutoRestartEnabled(enabled),
+  setAutoMirrorEnabled: (enabled: boolean) => InputMirror.setAutoMirrorEnabled(enabled),
 };

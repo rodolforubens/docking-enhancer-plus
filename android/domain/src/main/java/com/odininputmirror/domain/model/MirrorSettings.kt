@@ -8,6 +8,7 @@ data class MirrorSettings(
     val homeAsBack: Boolean = false,
     val comboHoldKillApp: Boolean = false,
     val autoRestart: Boolean = false,
+    val autoMirrorEnabled: Boolean = true,
     val expectedRunning: Boolean = false,
     val startedAt: Long = 0L,
 )

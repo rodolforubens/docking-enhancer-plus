@@ -10,4 +10,5 @@ data class MirrorStatus(
     val homeAsBack: Boolean,
     val comboHoldKillApp: Boolean,
     val autoRestart: Boolean,
+    val autoMirrorEnabled: Boolean,
 )

@@ -4,6 +4,7 @@ export type InputDevice = {
   guid?: string;
   controllerNumber?: number;
   handlers?: string[];
+  isOdinInternal?: boolean;
 };
 
 export type MirrorStatus = {
@@ -16,6 +17,7 @@ export type MirrorStatus = {
   homeAsBack?: boolean;
   comboHoldKillApp?: boolean;
   autoRestart?: boolean;
+  autoMirrorEnabled?: boolean;
 };
 
 export type Slot = 'local' | 'external';

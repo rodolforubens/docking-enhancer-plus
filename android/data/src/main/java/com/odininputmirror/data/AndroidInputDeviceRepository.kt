@@ -79,7 +79,7 @@ internal class AndroidInputDeviceRepository(
                 }
                     .thenByDescending { it.bus == BUS_BLUETOOTH }
                     .thenByDescending { it.bus == BUS_USB && it.vendorId != ODIN_VENDOR_ID }
-                    .thenBy { it.isOdinVirtualController }
+                    .thenBy { it.isOdinInternalController }
                     .thenBy { it.eventNumber }
             )
             .firstOrNull()
@@ -90,6 +90,7 @@ internal class AndroidInputDeviceRepository(
                     guid = controller.getGuid(),
                     controllerNumber = controller.controllerNumber,
                     handlers = entry.handlers,
+                    isOdinInternal = entry.isOdinInternalController,
                 )
             }
     }
@@ -123,8 +124,10 @@ internal class AndroidInputDeviceRepository(
         val eventNumber: Int
             get() = eventName.removePrefix("event").toIntOrNull() ?: Int.MAX_VALUE
 
-        val isOdinVirtualController: Boolean
-            get() = bus == BUS_USB && vendorId == ODIN_VENDOR_ID
+        val isOdinInternalController: Boolean
+            get() = bus == BUS_USB &&
+                vendorId == ODIN_VENDOR_ID &&
+                productId == ODIN_INTERNAL_CONTROLLER_PRODUCT_ID
     }
 }
 

@@ -18,6 +18,7 @@ internal fun List<ControllerDevice>.toWritableArray(): WritableArray {
         device.putString("guid", entry.guid)
         device.putInt("controllerNumber", entry.controllerNumber)
         device.putArray("handlers", handlers)
+        device.putBoolean("isOdinInternal", entry.isOdinInternal)
         devices.pushMap(device)
     }
     return devices
@@ -34,5 +35,6 @@ internal fun MirrorStatus.toWritableMap(): WritableMap {
     status.putBoolean("homeAsBack", homeAsBack)
     status.putBoolean("comboHoldKillApp", comboHoldKillApp)
     status.putBoolean("autoRestart", autoRestart)
+    status.putBoolean("autoMirrorEnabled", autoMirrorEnabled)
     return status
 }

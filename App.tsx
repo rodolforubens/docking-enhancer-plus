@@ -1,7 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
-  Modal,
   findNodeHandle,
   Pressable,
   SafeAreaView,
@@ -35,34 +34,23 @@ export default function App() {
   const externalCardRef = useRef<View>(null);
   const homeRowRef = useRef<View>(null);
   const comboRowRef = useRef<View>(null);
-  const restartRowRef = useRef<View>(null);
-  const ctaRef = useRef<View>(null);
+  const autoMirrorButtonRef = useRef<View>(null);
   const [focusIds, setFocusIds] = useState<Record<string, number>>({});
 
   const {
-    devices,
     localDevice,
     externalDevice,
-    activeSlot,
     enabled,
     loading,
     busy,
     message,
+    autoMirrorEnabled,
     homeAsBack,
     comboHoldKillApp,
-    autoRestart,
     restartWaiting,
-    canStart,
-    canToggle,
-    modalTitle,
-    openDeviceModal,
-    selectedDeviceFor,
-    selectDevice,
-    setActiveSlot,
+    toggleAutoMirrorEnabled,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
-    toggleAutoRestart,
-    toggleMirror,
   } = useMirrorController();
 
   useEffect(() => {
@@ -72,8 +60,7 @@ export default function App() {
         external: findNodeHandle(externalCardRef.current) ?? 0,
         home: findNodeHandle(homeRowRef.current) ?? 0,
         combo: findNodeHandle(comboRowRef.current) ?? 0,
-        restart: findNodeHandle(restartRowRef.current) ?? 0,
-        cta: findNodeHandle(ctaRef.current) ?? 0,
+        autoMirror: findNodeHandle(autoMirrorButtonRef.current) ?? 0,
       });
     };
 
@@ -99,8 +86,8 @@ export default function App() {
         </View>
 
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Controller Mapping</Text>
-          <Text style={styles.subtitle}>Select a controller to configure</Text>
+          <Text style={styles.sectionTitle}>Automatic Dock Mirror</Text>
+          <Text style={styles.subtitle}>Controllers are selected automatically while dock mode is active.</Text>
         </View>
 
         <View style={styles.grid}>
@@ -108,18 +95,16 @@ export default function App() {
             pressableRef={localCardRef}
             title="Local Controller"
             device={localDevice}
-            selected={activeSlot === 'local'}
+            hint="Odin internal · locked"
             preferredFocus
             tvFocus={{nextFocusRight: focusIds.external, nextFocusDown: focusIds.home}}
-            onPress={() => openDeviceModal('local')}
           />
           <DeviceCard
             pressableRef={externalCardRef}
             title="External Controller"
             device={externalDevice}
-            selected={activeSlot === 'external'}
+            hint="First connected controller"
             tvFocus={{nextFocusLeft: focusIds.local, nextFocusDown: focusIds.home}}
-            onPress={() => openDeviceModal('external')}
           />
         </View>
 
@@ -155,7 +140,7 @@ export default function App() {
           focusable
           disabled={enabled || busy}
           ref={comboRowRef}
-          {...({nextFocusUp: focusIds.home, nextFocusDown: focusIds.restart} as any)}
+          {...({nextFocusUp: focusIds.home, nextFocusDown: focusIds.autoMirror} as any)}
           accessibilityRole="switch"
           accessibilityLabel="Select plus Start closes app"
           accessibilityState={{disabled: enabled || busy, checked: comboHoldKillApp}}
@@ -179,70 +164,33 @@ export default function App() {
           />
         </Pressable>
 
-        <Pressable
-          focusable
-          disabled={enabled || busy}
-          ref={restartRowRef}
-          {...({nextFocusUp: focusIds.combo, nextFocusDown: focusIds.cta} as any)}
-          accessibilityRole="switch"
-          accessibilityLabel="Auto restart mirror"
-          accessibilityState={{disabled: enabled || busy, checked: autoRestart}}
-          onPress={() => toggleAutoRestart(!autoRestart)}
-          style={({focused, pressed}: PressableFocusState) => [
-            styles.settingRow,
-            focused && styles.focused,
-            pressed && styles.buttonPressed,
-            (enabled || busy) && styles.settingDisabled,
-          ]}>
-          <View style={styles.settingText}>
-            <Text style={styles.settingTitle}>Auto restart mirror</Text>
-            <Text style={styles.settingDescription}>Restart when the mirror stops or controllers reconnect</Text>
-          </View>
-          <Switch
-            disabled={enabled || busy}
-            value={autoRestart}
-            onValueChange={toggleAutoRestart}
-            trackColor={{false: '#2b2d38', true: '#1585C3'}}
-            thumbColor={autoRestart ? '#d7f1ff' : '#7e8494'}
-          />
-        </Pressable>
+        <Text style={styles.message}>
+          {loading ? 'Scanning controllers...' : restartWaiting ? 'Waiting for automatic mirror start...' : message}
+        </Text>
+        {!loading && !enabled && autoMirrorEnabled && (
+          <Text style={styles.hint}>The mirror starts automatically when the Odin controller and an external controller are available.</Text>
+        )}
 
         <Pressable
-          disabled={!canToggle || busy || loading}
-          ref={ctaRef}
-          {...({nextFocusUp: focusIds.restart} as any)}
+          disabled={busy}
+          ref={autoMirrorButtonRef}
+          {...({nextFocusUp: focusIds.combo} as any)}
           accessibilityRole="button"
-          accessibilityLabel={enabled ? 'Stop mirror' : 'Start mirror'}
-          accessibilityState={{disabled: !canToggle || busy || loading}}
-          onPress={toggleMirror}
+          accessibilityLabel={autoMirrorEnabled ? 'Turn off automatic mirror' : 'Turn on automatic mirror'}
+          accessibilityState={{disabled: busy}}
+          onPress={() => toggleAutoMirrorEnabled(!autoMirrorEnabled)}
           style={({focused, pressed}: PressableFocusState) => [
             styles.button,
-            enabled ? styles.buttonStop : styles.buttonStart,
-            (!canToggle || busy || loading) && styles.buttonDisabled,
+            autoMirrorEnabled ? styles.buttonStop : styles.buttonStart,
+            busy && styles.buttonDisabled,
             focused && styles.focused,
             pressed && styles.buttonPressed,
           ]}>
           <Text style={styles.buttonText}>
-            {busy ? 'Processing...' : enabled ? 'Stop Mirror' : 'Start Mirror'}
+            {busy ? 'Processing...' : autoMirrorEnabled ? 'Turn Off Automatic Mirror' : 'Turn On Automatic Mirror'}
           </Text>
         </Pressable>
-
-        <Text style={styles.message}>
-          {loading ? 'Scanning controllers...' : restartWaiting ? 'Waiting for controllers to reconnect...' : message}
-        </Text>
-        {!loading && !enabled && !canStart && (
-          <Text style={styles.hint}>Select different local and external controllers.</Text>
-        )}
       </ScrollView>
-
-      <DeviceModal
-        visible={activeSlot !== null}
-        title={modalTitle}
-        devices={devices}
-        selectedPath={selectedDeviceFor(activeSlot)?.path}
-        onClose={() => setActiveSlot(null)}
-        onSelect={selectDevice}
-      />
     </SafeAreaView>
   );
 }
@@ -251,18 +199,16 @@ function DeviceCard({
   pressableRef,
   title,
   device,
-  selected,
+  hint,
   preferredFocus,
   tvFocus,
-  onPress,
 }: {
   pressableRef?: React.Ref<View>;
   title: string;
   device: InputDevice | null;
-  selected: boolean;
+  hint: string;
   preferredFocus?: boolean;
   tvFocus?: TvFocusProps;
-  onPress: () => void;
 }) {
   return (
     <Pressable
@@ -270,70 +216,16 @@ function DeviceCard({
       focusable
       hasTVPreferredFocus={preferredFocus}
       {...(tvFocus as any)}
-      accessibilityRole="button"
-      accessibilityLabel={`${title}. ${device?.name ?? 'No device selected'}`}
-      accessibilityState={{selected}}
-      onPress={onPress}
-      style={({focused}: PressableFocusState) => [styles.card, selected && styles.cardSelected, focused && styles.focused]}>
+      accessibilityRole="text"
+      accessibilityLabel={`${title}. ${device?.name ?? 'No device detected'}`}
+      style={({focused}: PressableFocusState) => [styles.card, device && styles.cardSelected, focused && styles.focused]}>
       <IconDeviceGamepad2 color="#61718a" size={40} strokeWidth={2.2} style={styles.gamepadIcon} />
       <Text style={styles.cardTitle}>{title}</Text>
-      <Text style={styles.cardHint}>Tap to choose</Text>
+      <Text style={styles.cardHint}>{hint}</Text>
       <Text numberOfLines={1} style={device ? styles.cardDevice : styles.cardEmpty}>
         {device?.name ?? 'No device'}
       </Text>
     </Pressable>
-  );
-}
-
-function DeviceModal({
-  visible,
-  title,
-  devices,
-  selectedPath,
-  onClose,
-  onSelect,
-}: {
-  visible: boolean;
-  title: string;
-  devices: InputDevice[];
-  selectedPath?: string;
-  onClose: () => void;
-  onSelect: (device: InputDevice) => void;
-}) {
-  return (
-    <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
-      <Pressable focusable={false} style={styles.overlay} onPress={onClose}>
-        <Pressable focusable={false} style={styles.modal} onPress={() => undefined}>
-          <Text style={styles.modalTitle}>{title}</Text>
-          <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
-            {devices.map((device, index) => {
-              const selected = device.path === selectedPath;
-              return (
-                <Pressable
-                  key={device.path}
-                  focusable
-                  hasTVPreferredFocus={index === 0}
-                  accessibilityRole="button"
-                  accessibilityLabel={device.name}
-                  accessibilityState={{selected}}
-                  onPress={() => onSelect(device)}
-                  style={({focused}: PressableFocusState) => [styles.option, focused && styles.optionFocused]}>
-                  <View style={[styles.radio, selected && styles.radioSelected]}>
-                    {selected && <View style={styles.radioDot} />}
-                  </View>
-                  <View style={styles.optionText}>
-                    <Text numberOfLines={1} style={styles.optionName}>
-                      {device.name}
-                    </Text>
-                  </View>
-                </Pressable>
-              );
-            })}
-            {devices.length === 0 && <Text style={styles.emptyModal}>No controllers detected.</Text>}
-          </ScrollView>
-        </Pressable>
-      </Pressable>
-    </Modal>
   );
 }
 
@@ -485,6 +377,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     justifyContent: 'center',
     marginBottom: 16,
+    marginTop: spacing.lg,
     minHeight: 52,
     paddingVertical: 12,
   },

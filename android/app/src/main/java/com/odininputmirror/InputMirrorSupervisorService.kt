@@ -3,23 +3,28 @@ package com.odininputmirror
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import com.odininputmirror.data.InputMirrorGraph
-import com.odininputmirror.domain.usecase.RestartDecision
+import com.odininputmirror.domain.model.MirrorStartRequest
+import com.odininputmirror.domain.usecase.AutoMirrorDecision
 
 class InputMirrorSupervisorService : Service() {
     @Volatile
     private var running = false
     private var worker: Thread? = null
     private lateinit var graph: InputMirrorGraph
+    private lateinit var notificationManager: NotificationManager
+    private var supervisorState = SupervisorState.WaitingForDock
 
     override fun onCreate() {
         super.onCreate()
-        graph = InputMirrorGraph(this)
-        startForeground(NOTIFICATION_ID, buildNotification())
+        graph = InputMirrorGraph(this, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
+        notificationManager = getSystemService(NotificationManager::class.java)
+        startForeground(NOTIFICATION_ID, buildNotification(supervisorState))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -41,28 +46,85 @@ class InputMirrorSupervisorService : Service() {
 
     private fun superviseMirror() {
         var nextRestartAllowedAt = 0L
+        var nextRootRetryAllowedAt = 0L
         var sleepMs = SUPERVISOR_INTERVAL_MS
 
         while (running) {
             try {
                 val now = System.currentTimeMillis()
-                val decision = graph.restartMirrorIfNeeded(restartAllowed = now >= nextRestartAllowedAt)
-                when (decision) {
-                    RestartDecision.StopSupervisor -> {
-                        stopSelf()
-                        break
+                val settings = graph.settingsRepository.getSettings()
+                if (!settings.autoMirrorEnabled) {
+                    if (graph.processRepository.isRunning() || settings.expectedRunning) {
+                        runCatching { graph.stopMirror() }
                     }
-                    RestartDecision.Idle -> sleepMs = SUPERVISOR_IDLE_INTERVAL_MS
-                    RestartDecision.Running -> sleepMs = SUPERVISOR_INTERVAL_MS
-                    RestartDecision.WaitingForDevice -> sleepMs = SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS
-                    RestartDecision.Restarted -> {
+                    updateSupervisorState(SupervisorState.Disabled)
+                    sleepMs = SUPERVISOR_IDLE_INTERVAL_MS
+                    Thread.sleep(sleepMs)
+                    continue
+                }
+                val dockActive = graph.dockStateRepository.isDockActive()
+                val devices = if (dockActive) graph.inputDeviceRepository.getConnectedControllers() else emptyList()
+                val mirrorRunning = graph.processRepository.isRunning()
+                val decision = graph.resolveAutoMirrorDecision(
+                    dockActive = dockActive,
+                    devices = devices,
+                    settings = settings,
+                    mirrorRunning = mirrorRunning,
+                    restartAllowed = now >= nextRestartAllowedAt && now >= nextRootRetryAllowedAt,
+                )
+
+                when (decision) {
+                    AutoMirrorDecision.StopForDock -> {
+                        if (mirrorRunning || settings.expectedRunning) {
+                            runCatching { graph.stopMirror() }
+                        }
+                        updateSupervisorState(SupervisorState.WaitingForDock)
+                        sleepMs = SUPERVISOR_IDLE_INTERVAL_MS
+                    }
+                    AutoMirrorDecision.WaitingForInternalController -> {
+                        updateSupervisorState(SupervisorState.WaitingForInternalController)
+                        sleepMs = SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS
+                    }
+                    AutoMirrorDecision.WaitingForExternalController -> {
+                        updateSupervisorState(SupervisorState.WaitingForExternalController)
+                        sleepMs = SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS
+                    }
+                    AutoMirrorDecision.WaitingForRestartThrottle -> {
+                        if (supervisorState != SupervisorState.RootPermissionNeeded) {
+                            updateSupervisorState(SupervisorState.Restarting)
+                        }
+                        sleepMs = SUPERVISOR_INTERVAL_MS
+                    }
+                    AutoMirrorDecision.Running -> {
+                        updateSupervisorState(SupervisorState.Active)
+                        sleepMs = SUPERVISOR_INTERVAL_MS
+                    }
+                    is AutoMirrorDecision.Start -> {
+                        updateSupervisorState(SupervisorState.Starting)
+                        if (startMirror(decision.request)) {
+                            updateSupervisorState(SupervisorState.Active)
+                        } else {
+                            nextRootRetryAllowedAt = now + ROOT_PERMISSION_RETRY_MS
+                        }
+                        nextRestartAllowedAt = now + RESTART_THROTTLE_MS
+                        sleepMs = SUPERVISOR_INTERVAL_MS
+                    }
+                    is AutoMirrorDecision.Restart -> {
+                        updateSupervisorState(SupervisorState.Restarting)
+                        runCatching { graph.stopMirror() }
+                        if (startMirror(decision.request)) {
+                            updateSupervisorState(SupervisorState.Active)
+                        } else {
+                            nextRootRetryAllowedAt = now + ROOT_PERMISSION_RETRY_MS
+                        }
                         nextRestartAllowedAt = now + RESTART_THROTTLE_MS
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }
                 }
             } catch (_: Exception) {
                 // Keep the supervisor alive; transient root/device failures are expected during reconnects.
-                sleepMs = SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS
+                updateSupervisorState(SupervisorState.Error)
+                sleepMs = SUPERVISOR_ERROR_INTERVAL_MS
             }
 
             try {
@@ -73,15 +135,32 @@ class InputMirrorSupervisorService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification {
+    private fun startMirror(request: MirrorStartRequest): Boolean {
+        return runCatching {
+            graph.startMirror(request)
+            true
+        }.getOrElse {
+            updateSupervisorState(SupervisorState.RootPermissionNeeded)
+            false
+        }
+    }
+
+    private fun updateSupervisorState(state: SupervisorState) {
+        if (supervisorState == state) {
+            return
+        }
+        supervisorState = state
+        notificationManager.notify(NOTIFICATION_ID, buildNotification(state))
+    }
+
+    private fun buildNotification(state: SupervisorState): Notification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
                 "Mirror supervisor",
                 NotificationManager.IMPORTANCE_LOW,
             )
-            manager.createNotificationChannel(channel)
+            notificationManager.createNotificationChannel(channel)
         }
 
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -91,12 +170,33 @@ class InputMirrorSupervisorService : Service() {
             Notification.Builder(this)
         }
 
+        val launchIntent = Intent(this, MainActivity::class.java)
+        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pendingIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingIntentFlags)
+
         return builder
             .setContentTitle("Docking Enhancer")
-            .setContentText("Keeping controller mirror ready")
+            .setContentText(state.notificationText)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
+            .setContentIntent(pendingIntent)
             .build()
+    }
+
+    private enum class SupervisorState(val notificationText: String) {
+        WaitingForDock("Waiting for external display"),
+        Disabled("Automatic mirror disabled"),
+        WaitingForInternalController("Waiting for Odin controller"),
+        WaitingForExternalController("Waiting for external controller"),
+        Starting("Starting dock mirror"),
+        Active("Dock mirror active"),
+        Restarting("Restarting dock mirror"),
+        RootPermissionNeeded("Open app to grant root"),
+        Error("Mirror supervisor error"),
     }
 
     companion object {
@@ -105,6 +205,8 @@ class InputMirrorSupervisorService : Service() {
         private const val SUPERVISOR_INTERVAL_MS = 2500L
         private const val SUPERVISOR_IDLE_INTERVAL_MS = 8000L
         private const val SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS = 6000L
+        private const val SUPERVISOR_ERROR_INTERVAL_MS = 15000L
         private const val RESTART_THROTTLE_MS = 10000L
+        private const val ROOT_PERMISSION_RETRY_MS = 60000L
     }
 }

@@ -6,4 +6,5 @@ data class ControllerDevice(
     val guid: String,
     val controllerNumber: Int,
     val handlers: List<String> = emptyList(),
+    val isOdinInternal: Boolean = false,
 )

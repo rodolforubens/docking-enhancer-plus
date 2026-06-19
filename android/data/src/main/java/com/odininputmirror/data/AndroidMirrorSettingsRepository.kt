@@ -17,6 +17,7 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             homeAsBack = prefs.getBoolean(KEY_HOME_AS_BACK, false),
             comboHoldKillApp = prefs.getBoolean(KEY_COMBO_HOLD_KILL_APP, false),
             autoRestart = prefs.getBoolean(KEY_AUTO_RESTART, false),
+            autoMirrorEnabled = prefs.getBoolean(KEY_AUTO_MIRROR_ENABLED, true),
             expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false),
             startedAt = prefs.getLong(KEY_STARTED_AT, 0L),
         )
@@ -58,5 +59,9 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
 
     override fun setAutoRestartEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_RESTART, enabled).apply()
+    }
+
+    override fun setAutoMirrorEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_MIRROR_ENABLED, enabled).apply()
     }
 }
