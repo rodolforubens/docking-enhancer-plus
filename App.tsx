@@ -2,6 +2,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
   findNodeHandle,
+  Modal,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -38,6 +39,7 @@ export default function App() {
   const [focusIds, setFocusIds] = useState<Record<string, number>>({});
 
   const {
+    devices,
     localDevice,
     externalDevice,
     enabled,
@@ -49,10 +51,15 @@ export default function App() {
     comboHoldKillApp,
     restartWaiting,
     docked,
+    manualInternalGuid,
+    hasKnownInternalProfile,
     toggleAutoMirrorEnabled,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
+    selectInternalController,
   } = useMirrorController();
+
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     const updateFocusIds = () => {
@@ -101,8 +108,16 @@ export default function App() {
             pressableRef={localCardRef}
             title="Local Controller"
             device={localDevice}
-            hint="Odin internal · locked"
+            hint={
+              autoMirrorEnabled
+                ? 'Locked while mirror is on'
+                : hasKnownInternalProfile
+                ? 'Auto-detected · tap to change'
+                : 'Tap to select internal'
+            }
             preferredFocus
+            disabled={autoMirrorEnabled}
+            onPress={busy || autoMirrorEnabled ? undefined : () => setPickerOpen(true)}
             tvFocus={{nextFocusRight: focusIds.external, nextFocusDown: focusIds.home}}
           />
           <DeviceCard
@@ -197,7 +212,75 @@ export default function App() {
           </Text>
         </Pressable>
       </ScrollView>
+
+      <InternalControllerPicker
+        visible={pickerOpen}
+        devices={devices}
+        selectedGuid={manualInternalGuid}
+        onSelect={guid => {
+          setPickerOpen(false);
+          selectInternalController(guid);
+        }}
+        onClose={() => setPickerOpen(false)}
+      />
     </SafeAreaView>
+  );
+}
+
+function InternalControllerPicker({
+  visible,
+  devices,
+  selectedGuid,
+  onSelect,
+  onClose,
+}: {
+  visible: boolean;
+  devices: InputDevice[];
+  selectedGuid: string | null;
+  onSelect: (guid: string | null) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <Pressable style={styles.overlay} onPress={onClose}>
+        <Pressable style={styles.modal} onPress={() => undefined}>
+          <Text style={styles.modalTitle}>Select internal controller</Text>
+          <ScrollView style={styles.modalList} contentContainerStyle={styles.modalListContent}>
+            <PickerOption name="Automatic (detect)" selected={!selectedGuid} onPress={() => onSelect(null)} />
+            {devices.length === 0 ? (
+              <Text style={styles.emptyModal}>No controllers detected. Connect the built-in controller and try again.</Text>
+            ) : (
+              devices.map(device => (
+                <PickerOption
+                  key={device.guid ?? device.path}
+                  name={device.name}
+                  selected={Boolean(device.guid && device.guid === selectedGuid)}
+                  onPress={() => device.guid && onSelect(device.guid)}
+                />
+              ))
+            )}
+          </ScrollView>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+function PickerOption({name, selected, onPress}: {name: string; selected: boolean; onPress: () => void}) {
+  return (
+    <Pressable
+      focusable
+      accessibilityRole="radio"
+      accessibilityState={{selected}}
+      onPress={onPress}
+      style={({focused}: PressableFocusState) => [styles.option, focused && styles.optionFocused]}>
+      <View style={[styles.radio, selected && styles.radioSelected]}>{selected && <View style={styles.radioDot} />}</View>
+      <View style={styles.optionText}>
+        <Text numberOfLines={1} style={styles.optionName}>
+          {name}
+        </Text>
+      </View>
+    </Pressable>
   );
 }
 
@@ -207,6 +290,8 @@ function DeviceCard({
   device,
   hint,
   preferredFocus,
+  onPress,
+  disabled,
   tvFocus,
 }: {
   pressableRef?: React.Ref<View>;
@@ -214,6 +299,8 @@ function DeviceCard({
   device: InputDevice | null;
   hint: string;
   preferredFocus?: boolean;
+  onPress?: () => void;
+  disabled?: boolean;
   tvFocus?: TvFocusProps;
 }) {
   return (
@@ -221,10 +308,18 @@ function DeviceCard({
       ref={pressableRef}
       focusable
       hasTVPreferredFocus={preferredFocus}
+      onPress={onPress}
       {...(tvFocus as any)}
-      accessibilityRole="text"
+      accessibilityRole={onPress ? 'button' : 'text'}
+      accessibilityState={{disabled: Boolean(disabled)}}
       accessibilityLabel={`${title}. ${device?.name ?? 'No device detected'}`}
-      style={({focused}: PressableFocusState) => [styles.card, device && styles.cardSelected, focused && styles.focused]}>
+      style={({focused, pressed}: PressableFocusState) => [
+        styles.card,
+        device && styles.cardSelected,
+        focused && styles.focused,
+        pressed && onPress && styles.buttonPressed,
+        disabled && styles.settingDisabled,
+      ]}>
       <IconDeviceGamepad2 color="#61718a" size={40} strokeWidth={2.2} style={styles.gamepadIcon} />
       <Text style={styles.cardTitle}>{title}</Text>
       <Text style={styles.cardHint}>{hint}</Text>

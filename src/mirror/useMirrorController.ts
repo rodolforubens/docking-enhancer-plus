@@ -22,6 +22,7 @@ export function useMirrorController() {
   const [autoMirrorEnabled, setAutoMirrorEnabled] = useState(true);
   const [restartWaiting, setRestartWaiting] = useState(false);
   const [docked, setDocked] = useState(false);
+  const [manualInternalGuid, setManualInternalGuid] = useState<string | null>(null);
 
   // refreshDevices/refreshMirrorState/initialLoad can be triggered concurrently (AppState
   // change + the 2s poll interval). Each call claims the next id before awaiting, and only
@@ -41,9 +42,10 @@ export function useMirrorController() {
     setAutoMirrorEnabled(status.autoMirrorEnabled !== false);
     setRestartWaiting(Boolean(status.expectedRunning && !status.running));
     setDocked(Boolean(status.docked));
+    setManualInternalGuid(status.manualInternalGuid ?? null);
 
-    const autoLocal = availableDevices.find(device => device.isOdinInternal) ?? null;
-    const autoExternal = availableDevices.find(device => !device.isOdinInternal) ?? null;
+    const autoLocal = availableDevices.find(device => device.isInternal) ?? null;
+    const autoExternal = availableDevices.find(device => !device.isInternal) ?? null;
     const savedExternalIsLocal = autoLocal
       ? savedIdentityMatchesDevice(status.source, status.sourceGuid, autoLocal)
       : false;
@@ -186,6 +188,28 @@ export function useMirrorController() {
     }
   }
 
+  async function selectInternalController(guid: string | null) {
+    if (busy) {
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await inputMirrorClient.setManualInternalController(guid);
+      setManualInternalGuid(guid);
+      await refreshDevices(false);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // On a recognised handheld (e.g. Odin) the native layer flags the internal controller by
+  // hardware signature and locks it. Otherwise the internal defaults to the first detected
+  // controller and the user can re-pick it manually.
+  const hasKnownInternalProfile = devices.some(device => device.isKnownInternal);
+
   return {
     devices,
     localDevice,
@@ -199,9 +223,12 @@ export function useMirrorController() {
     autoMirrorEnabled,
     restartWaiting,
     docked,
+    manualInternalGuid,
+    hasKnownInternalProfile,
     toggleHomeAsBack,
     toggleComboHoldKillApp,
     toggleAutoMirrorEnabled,
+    selectInternalController,
   };
 }
 
@@ -214,11 +241,11 @@ function buildStatusMessage(status: MirrorStatus, devices: InputDevice[]) {
     return 'Automatic dock mirror is disabled.';
   }
 
-  if (!devices.some(device => device.isOdinInternal)) {
+  if (!devices.some(device => device.isInternal)) {
     return 'Waiting for Odin internal controller.';
   }
 
-  if (!devices.some(device => !device.isOdinInternal)) {
+  if (!devices.some(device => !device.isInternal)) {
     return 'Waiting for an external controller.';
   }
 

@@ -18,6 +18,7 @@ type InputMirrorNative = {
   setComboHoldKillAppEnabled(enabled: boolean): Promise<boolean>;
   setAutoRestartEnabled(enabled: boolean): Promise<boolean>;
   setAutoMirrorEnabled(enabled: boolean): Promise<boolean>;
+  setManualInternalController(guid: string | null): Promise<string | null>;
 };
 
 const {InputMirror} = NativeModules as {InputMirror: InputMirrorNative};
@@ -39,4 +40,5 @@ export const inputMirrorClient = {
   setComboHoldKillAppEnabled: (enabled: boolean) => InputMirror.setComboHoldKillAppEnabled(enabled),
   setAutoRestartEnabled: (enabled: boolean) => InputMirror.setAutoRestartEnabled(enabled),
   setAutoMirrorEnabled: (enabled: boolean) => InputMirror.setAutoMirrorEnabled(enabled),
+  setManualInternalController: (guid: string | null) => InputMirror.setManualInternalController(guid),
 };
