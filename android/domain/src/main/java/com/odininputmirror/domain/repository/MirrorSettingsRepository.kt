@@ -12,4 +12,5 @@ interface MirrorSettingsRepository {
     fun setComboHoldKillAppEnabled(enabled: Boolean)
     fun setAutoRestartEnabled(enabled: Boolean)
     fun setAutoMirrorEnabled(enabled: Boolean)
+    fun setManualInternalController(guid: String?)
 }

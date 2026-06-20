@@ -18,7 +18,8 @@ internal fun List<ControllerDevice>.toWritableArray(): WritableArray {
         device.putString("guid", entry.guid)
         device.putInt("controllerNumber", entry.controllerNumber)
         device.putArray("handlers", handlers)
-        device.putBoolean("isOdinInternal", entry.isOdinInternal)
+        device.putBoolean("isInternal", entry.isInternal)
+        device.putBoolean("isKnownInternal", entry.isKnownInternal)
         devices.pushMap(device)
     }
     return devices
@@ -37,5 +38,6 @@ internal fun MirrorStatus.toWritableMap(): WritableMap {
     status.putBoolean("autoRestart", autoRestart)
     status.putBoolean("autoMirrorEnabled", autoMirrorEnabled)
     status.putBoolean("docked", docked)
+    status.putString("manualInternalGuid", manualInternalGuid)
     return status
 }

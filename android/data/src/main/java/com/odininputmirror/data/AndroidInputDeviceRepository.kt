@@ -9,6 +9,7 @@ import java.io.File
 internal class AndroidInputDeviceRepository(
     private val shell: Shell = Shell(),
     private val pathExists: (String) -> Boolean = { File(it).exists() },
+    private val manualInternalGuidProvider: () -> String? = { null },
 ) : InputDeviceRepository {
     override fun getConnectedControllers(): List<ControllerDevice> {
         val procEntries = shell.runShell("cat /proc/bus/input/devices")
@@ -17,7 +18,7 @@ internal class AndroidInputDeviceRepository(
 
         val mirroredNames = computeMirroredNames(procEntries)
 
-        return InputDevice.getDeviceIds()
+        val devices = InputDevice.getDeviceIds()
             .asSequence()
             .mapNotNull { id -> InputDevice.getDevice(id) }
             .filter { device -> isPhysicalGameController(device) }
@@ -26,6 +27,36 @@ internal class AndroidInputDeviceRepository(
             .distinctBy { it.path }
             .sortedBy { it.controllerNumber }
             .toList()
+
+        return resolveInternalController(devices, manualInternalGuidProvider())
+    }
+
+    // Decides which controller is the internal one:
+    //  1. The user's manual pick wins, if its controller is connected — even over a recognised
+    //     signature, so the auto-detection can always be overridden just in case.
+    //  2. Otherwise a recognised handheld signature (Odin).
+    //  3. Otherwise the first detected controller, assumed to be the always-attached built-in.
+    internal fun resolveInternalController(
+        devices: List<ControllerDevice>,
+        manualGuid: String?,
+    ): List<ControllerDevice> {
+        if (devices.isEmpty()) {
+            return devices
+        }
+
+        val manualMatch = manualGuid?.let { guid -> devices.firstOrNull { it.guid == guid } }
+        if (manualMatch != null) {
+            return devices.map { device -> device.copy(isInternal = device.path == manualMatch.path) }
+        }
+
+        if (devices.any { it.isKnownInternal }) {
+            return devices
+        }
+
+        val first = devices.first()
+        return devices.map { device ->
+            if (device.path == first.path) device.copy(isInternal = true) else device
+        }
     }
 
     override fun findSavedDevice(
@@ -34,16 +65,22 @@ internal class AndroidInputDeviceRepository(
         devices: List<ControllerDevice>,
     ): ControllerDevice? = devices.findSavedControllerDevice(path = path, guid = guid)
 
-    // The Odin OS mirrors any active controller (internal or external) as a virtual HID node
-    // carrying Odin's own vendor/product id, for game-compatibility reasons. Such a mirrored
-    // node always has a "twin" proc entry with the same name on a real, non-Odin vendor id
+    // Some handhelds (e.g. the Odin) re-expose any active controller as a virtual HID node
+    // carrying the handheld's own vendor id, for game-compatibility reasons. Such a mirrored
+    // node always has a "twin" proc entry with the same name on a real, non-quirk vendor id
     // (e.g. the actual Bluetooth identity). The genuine internal controller has no such twin,
-    // so this distinguishes it from a mirrored external controller.
-    internal fun computeMirroredNames(procEntries: List<ProcInputEntry>): Set<String> =
-        procEntries
-            .filter { it.vendorId != ODIN_VENDOR_ID }
+    // so this distinguishes it from a mirrored external controller. Only relevant when a
+    // mirroring-quirk device is actually present; otherwise there is nothing to disambiguate.
+    internal fun computeMirroredNames(procEntries: List<ProcInputEntry>): Set<String> {
+        val hasQuirkDevice = procEntries.any { it.vendorId in MIRRORING_QUIRK_VENDOR_IDS }
+        if (!hasQuirkDevice) {
+            return emptySet()
+        }
+        return procEntries
+            .filter { it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS }
             .map { it.name.lowercase() }
             .toSet()
+    }
 
     internal fun resolveControllerDevice(
         candidate: ControllerCandidate,
@@ -59,8 +96,8 @@ internal class AndroidInputDeviceRepository(
             val sameVendorProduct =
                 candidate.vendorId != 0 &&
                     candidate.productId != 0 &&
-                    candidate.vendorId != ODIN_VENDOR_ID &&
-                    entry.vendorId != ODIN_VENDOR_ID &&
+                    candidate.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
+                    entry.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
                     entry.vendorId == candidate.vendorId &&
                     entry.productId == candidate.productId
             val sameName = entry.name.lowercase() == normalizedName
@@ -70,13 +107,13 @@ internal class AndroidInputDeviceRepository(
         return candidates
             .sortedWith(
                 compareByDescending<ProcInputEntry> {
-                    candidate.vendorId != ODIN_VENDOR_ID &&
+                    candidate.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
                         it.vendorId == candidate.vendorId &&
                         it.productId == candidate.productId
                 }
                     .thenByDescending { it.bus == BUS_BLUETOOTH }
-                    .thenByDescending { it.bus == BUS_USB && it.vendorId != ODIN_VENDOR_ID }
-                    .thenBy { it.isOdinInternalController }
+                    .thenByDescending { it.bus == BUS_USB && it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS }
+                    .thenBy { it.isInternalControllerSignature }
                     .thenBy { it.eventNumber }
             )
             .firstOrNull()
@@ -87,7 +124,8 @@ internal class AndroidInputDeviceRepository(
                     guid = candidate.guid,
                     controllerNumber = candidate.controllerNumber,
                     handlers = entry.handlers,
-                    isOdinInternal = entry.isOdinInternalController && entry.name.lowercase() !in mirroredNames,
+                    isInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames,
+                    isKnownInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames,
                 )
             }
     }
@@ -140,10 +178,8 @@ internal class AndroidInputDeviceRepository(
         val eventNumber: Int
             get() = eventName.removePrefix("event").toIntOrNull() ?: Int.MAX_VALUE
 
-        val isOdinInternalController: Boolean
-            get() = bus == BUS_USB &&
-                vendorId == ODIN_VENDOR_ID &&
-                productId in ODIN_INTERNAL_CONTROLLER_PRODUCT_IDS
+        val isInternalControllerSignature: Boolean
+            get() = matchedInternalSignature(vendorId, productId) != null
     }
 }
 

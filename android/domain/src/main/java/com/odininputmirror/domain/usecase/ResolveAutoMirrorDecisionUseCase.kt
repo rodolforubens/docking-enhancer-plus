@@ -16,9 +16,9 @@ class ResolveAutoMirrorDecisionUseCase {
             return AutoMirrorDecision.StopForDock
         }
 
-        val local = devices.firstOrNull { it.isOdinInternal }
+        val local = devices.firstOrNull { it.isInternal }
             ?: return AutoMirrorDecision.WaitingForInternalController
-        val external = devices.firstOrNull { !it.isOdinInternal && !it.isSamePhysicalControllerAs(local) }
+        val external = devices.firstOrNull { !it.isInternal && !it.isSamePhysicalControllerAs(local) }
             ?: return AutoMirrorDecision.WaitingForExternalController
 
         if (local.path == external.path) {

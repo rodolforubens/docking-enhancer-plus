@@ -130,6 +130,16 @@ class InputMirrorModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    @ReactMethod
+    fun setManualInternalController(guid: String?, promise: Promise) {
+        try {
+            graph.setManualInternalController(if (guid.isNullOrBlank()) null else guid)
+            promise.resolve(guid)
+        } catch (error: Exception) {
+            promise.reject("SAVE_SETTING_FAILED", error.message, error)
+        }
+    }
+
     private fun startSupervisor() {
         val intent = Intent(reactContext, InputMirrorSupervisorService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

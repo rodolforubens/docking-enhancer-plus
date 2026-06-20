@@ -20,6 +20,7 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             autoMirrorEnabled = prefs.getBoolean(KEY_AUTO_MIRROR_ENABLED, true),
             expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false),
             startedAt = prefs.getLong(KEY_STARTED_AT, 0L),
+            manualInternalGuid = prefs.getString(KEY_MANUAL_INTERNAL_GUID, null),
         )
     }
 
@@ -63,5 +64,15 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_AUTO_MIRROR_ENABLED, enabled).apply()
+    }
+
+    override fun setManualInternalController(guid: String?) {
+        prefs.edit().apply {
+            if (guid.isNullOrBlank()) {
+                remove(KEY_MANUAL_INTERNAL_GUID)
+            } else {
+                putString(KEY_MANUAL_INTERNAL_GUID, guid)
+            }
+        }.apply()
     }
 }

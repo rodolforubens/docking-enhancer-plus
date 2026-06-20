@@ -33,6 +33,7 @@ class GetMirrorStatusUseCase(
             autoRestart = settings.autoRestart,
             autoMirrorEnabled = settings.autoMirrorEnabled,
             docked = dockStateRepository.isDockActive(),
+            manualInternalGuid = settings.manualInternalGuid,
         )
     }
 }

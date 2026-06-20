@@ -500,7 +500,7 @@ class MirrorUseCaseTest {
         guid = guid,
         controllerNumber = controllerNumber,
         handlers = listOf("event${path.substringAfterLast("event")}"),
-        isOdinInternal = true,
+        isInternal = true,
     )
 }
 
@@ -588,6 +588,10 @@ private class FakeMirrorSettingsRepository(
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {
         state = state.copy(autoMirrorEnabled = enabled)
+    }
+
+    override fun setManualInternalController(guid: String?) {
+        state = state.copy(manualInternalGuid = guid)
     }
 }
 

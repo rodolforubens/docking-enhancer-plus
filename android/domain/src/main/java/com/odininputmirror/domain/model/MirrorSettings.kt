@@ -11,4 +11,5 @@ data class MirrorSettings(
     val autoMirrorEnabled: Boolean = true,
     val expectedRunning: Boolean = false,
     val startedAt: Long = 0L,
+    val manualInternalGuid: String? = null,
 )

@@ -13,6 +13,7 @@ import com.odininputmirror.domain.usecase.SetAutoRestartEnabledUseCase
 import com.odininputmirror.domain.usecase.SetAutoMirrorEnabledUseCase
 import com.odininputmirror.domain.usecase.SetComboHoldKillAppEnabledUseCase
 import com.odininputmirror.domain.usecase.SetHomeAsBackEnabledUseCase
+import com.odininputmirror.domain.usecase.SetManualInternalControllerUseCase
 import com.odininputmirror.domain.usecase.StartMirrorUseCase
 import com.odininputmirror.domain.usecase.StopMirrorUseCase
 
@@ -22,7 +23,10 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
 
     val settingsRepository: MirrorSettingsRepository = AndroidMirrorSettingsRepository(appContext)
     val dockStateRepository: DockStateRepository = AndroidDisplayDockStateRepository(appContext, forceDockMode)
-    val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(shell)
+    val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(
+        shell = shell,
+        manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },
+    )
     val processRepository: MirrorProcessRepository = RootMirrorProcessRepository(
         context = appContext,
         mirrorSettingsRepository = settingsRepository,
@@ -37,6 +41,7 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
     val setComboHoldKillAppEnabled = SetComboHoldKillAppEnabledUseCase(settingsRepository)
     val setAutoRestartEnabled = SetAutoRestartEnabledUseCase(settingsRepository)
     val setAutoMirrorEnabled = SetAutoMirrorEnabledUseCase(settingsRepository)
+    val setManualInternalController = SetManualInternalControllerUseCase(settingsRepository)
     val resolveAutoMirrorDecision = ResolveAutoMirrorDecisionUseCase()
     val restartMirrorIfNeeded = RestartMirrorIfNeededUseCase(
         inputDeviceRepository = inputDeviceRepository,

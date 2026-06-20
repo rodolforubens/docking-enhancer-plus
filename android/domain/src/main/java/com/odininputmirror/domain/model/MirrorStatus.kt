@@ -12,4 +12,5 @@ data class MirrorStatus(
     val autoRestart: Boolean,
     val autoMirrorEnabled: Boolean,
     val docked: Boolean,
+    val manualInternalGuid: String?,
 )

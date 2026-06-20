@@ -37,8 +37,6 @@ internal val CONTROLLER_AXES = intArrayOf(
 
 internal const val BUS_USB = 0x0003
 internal const val BUS_BLUETOOTH = 0x0005
-internal const val ODIN_VENDOR_ID = 0x2020
-internal val ODIN_INTERNAL_CONTROLLER_PRODUCT_IDS = setOf(0x0111, 0x0112)
 
 internal const val PREFS = "input_mirror"
 internal const val KEY_SOURCE = "source"
@@ -51,6 +49,7 @@ internal const val KEY_AUTO_RESTART = "auto_restart"
 internal const val KEY_AUTO_MIRROR_ENABLED = "auto_mirror_enabled"
 internal const val KEY_EXPECTED_RUNNING = "expected_running"
 internal const val KEY_STARTED_AT = "started_at"
+internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
