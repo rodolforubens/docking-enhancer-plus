@@ -1,5 +1,4 @@
 pluginManagement {
-    includeBuild("../node_modules/@react-native/gradle-plugin")
     repositories {
         google()
         mavenCentral()
@@ -7,19 +6,12 @@ pluginManagement {
     }
 }
 
-plugins {
-    id("com.facebook.react.settings")
-}
-
-apply from: file("../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
-applyNativeModulesSettingsGradle(settings)
-
-
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
     repositories {
         google()
         mavenCentral()
+        maven { url "https://jitpack.io" }
     }
 }
 
@@ -27,4 +19,3 @@ rootProject.name = "OdinInputMirror"
 include ":app"
 include ":domain"
 include ":data"
-includeBuild("../node_modules/@react-native/gradle-plugin")

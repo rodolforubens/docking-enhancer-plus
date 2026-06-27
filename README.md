@@ -1,6 +1,8 @@
 # Odin Input Mirror
 
-Aplicacion React Native para clonar eventos de entrada desde un control externo Bluetooth hacia el dispositivo de entrada del joystick integrado en Android con root.
+Aplicacion Android nativa (Kotlin + Jetpack Compose) para clonar eventos de entrada desde un control externo Bluetooth hacia el dispositivo de entrada del joystick integrado en Android con root.
+
+Stack: Kotlin 2.0.21, Jetpack Compose + Material 3 (BOM 2024.10.01), Gradle 8.11.1, AGP 8.7.3, JVM 17, root via topjohnwu libsu 5.2.2 (JitPack). minSdk 28, target/compileSdk 35.
 
 > Requiere root. Escribe directamente en `/dev/input/eventX`, por lo que debes verificar bien origen y destino antes de activar el espejo.
 
@@ -8,23 +10,28 @@ Aplicacion React Native para clonar eventos de entrada desde un control externo 
 
 ```text
 .
-├── App.tsx
-├── package.json
-├── tsconfig.json
 ├── android/
-│   └── app/
-│       ├── build.gradle
-│       ├── src/main/
-│       │   ├── AndroidManifest.xml
-│       │   ├── assets/input_mirror/README.txt
-│       │   ├── java/com/odininputmirror/
-│       │   │   ├── MainApplication.kt
-│       │   │   ├── InputMirrorModule.kt
-│       │   │   ├── InputMirrorPackage.kt
-│       │   │   └── InputMirrorTileService.kt
-│       │   └── native/input_mirror.c
-│       └── src/main/res/values/strings.xml
+│   ├── settings.gradle
+│   ├── gradle/libs.versions.toml
+│   ├── app/        # Compose UI + MainActivity/MainApplication + supervisor service
+│   │   └── src/main/
+│   │       ├── java/com/odininputmirror/
+│   │       │   ├── MainActivity.kt
+│   │       │   ├── MainApplication.kt
+│   │       │   ├── InputMirrorSupervisorService.kt
+│   │       │   └── ui/   # MirrorScreen, MirrorViewModel, theme
+│   │       ├── assets/input_mirror/input_mirror
+│   │       └── native/input_mirror.c
+│   ├── data/       # InputMirrorGraph, repos, Shell (libsu)
+│   └── domain/     # use cases + interfaces + models (Kotlin puro)
 └── scripts/build-input-mirror.ps1
+```
+
+## Compilar e instalar
+
+```powershell
+.\android\gradlew.bat -p .\android :app:assembleDebug
+adb install -r .\android\app\build\outputs\apk\debug\app-debug.apk
 ```
 
 ## Compilar el binario C con Android NDK
@@ -48,17 +55,10 @@ El script compila `android/app/src/main/native/input_mirror.c` para `arm64-v8a` 
 android/app/src/main/assets/input_mirror/input_mirror
 ```
 
-En tiempo de ejecucion, el modulo Kotlin copia ese asset a `filesDir/bin/input_mirror`, le aplica `chmod 755` y lo ejecuta con:
+En tiempo de ejecucion, el modulo Kotlin copia ese asset a `filesDir/bin/input_mirror`, le aplica `chmod 755` y lo ejecuta vía la sesion root de libsu:
 
 ```sh
-su -c 'nice -n -20 /data/data/<paquete>/files/bin/input_mirror <source> <target> &'
-```
-
-## Instalar dependencias RN
-
-```powershell
-npm install
-npm run android
+nice -n -20 /data/data/<paquete>/files/bin/input_mirror <source> <target> &
 ```
 
 ## Notas operativas

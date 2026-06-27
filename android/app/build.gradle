@@ -1,14 +1,8 @@
 plugins {
     id "com.android.application"
     id "org.jetbrains.kotlin.android"
-    id "com.facebook.react"
+    id "org.jetbrains.kotlin.plugin.compose"
 }
-
-react {
-}
-
-apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
-applyNativeModulesAppBuildGradle(project)
 
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
@@ -22,7 +16,7 @@ android {
 
     defaultConfig {
         applicationId "com.odininputmirror"
-        minSdk 23
+        minSdk 28
         targetSdk 35
         versionCode 1
         versionName "0.1.0"
@@ -31,6 +25,16 @@ android {
 
     buildFeatures {
         buildConfig true
+        compose true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
     }
 
     signingConfigs {
@@ -61,12 +65,19 @@ android {
 dependencies {
     implementation project(":domain")
     implementation project(":data")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("com.facebook.react:react-android")
 
-    if (hermesEnabled.toBoolean()) {
-        implementation("com.facebook.react:hermes-android")
-    } else {
-        implementation jscFlavor
-    }
+    implementation libs.androidx.core.ktx
+    implementation libs.androidx.lifecycle.runtime.ktx
+    implementation libs.androidx.lifecycle.runtime.compose
+    implementation libs.androidx.lifecycle.viewmodel.compose
+    implementation libs.androidx.activity.compose
+
+    implementation platform(libs.androidx.compose.bom)
+    implementation libs.androidx.ui
+    implementation libs.androidx.ui.graphics
+    implementation libs.androidx.ui.tooling.preview
+    implementation libs.androidx.material3
+    debugImplementation libs.androidx.ui.tooling
+
+    implementation libs.libsu.core
 }
