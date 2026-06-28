@@ -1,8 +1,12 @@
 package com.odininputmirror.ui
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +32,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,7 +40,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.text.font.FontWeight
@@ -45,13 +53,35 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.odininputmirror.MainActivity
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.ui.theme.Palette
+import kotlinx.coroutines.delay
+
+private fun Context.findMainActivity(): MainActivity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is MainActivity) return current
+        current = current.baseContext
+    }
+    return null
+}
 
 @Composable
 fun MirrorScreen(viewModel: MirrorViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var pickerOpen by remember { mutableStateOf(false) }
+    val primaryFocus = remember { FocusRequester() }
+    val scrollState = rememberScrollState()
+
+    // Bridge the Activity's analog-stick handler to this screen's scroll state so the left stick
+    // free-scrolls the whole page (header included), independent of which control has focus.
+    val context = LocalContext.current
+    DisposableEffect(context, scrollState) {
+        val activity = context.findMainActivity()
+        activity?.scrollConsumer = { delta -> scrollState.dispatchRawDelta(delta) }
+        onDispose { activity?.scrollConsumer = null }
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -64,6 +94,24 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // Give the gamepad a focus anchor on launch so the D-pad works immediately, even when the
+    // mirror locks every other control and the primary button is the only focusable target.
+    // Retry across a few frames because the focus node may not be placed on the first pass.
+    LaunchedEffect(Unit) {
+        repeat(10) {
+            if (runCatching { primaryFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+            delay(50)
+        }
+    }
+
+    // When a state change disables whatever had focus — toggling the mirror briefly makes the
+    // button busy, and starting/stopping it locks the cards and rows — Compose clears focus and
+    // the D-pad has nothing to navigate from. Send focus back to the always-focusable button so
+    // gamepad navigation keeps working after every transition.
+    LaunchedEffect(state.enabled, state.autoMirrorEnabled, state.busy) {
+        runCatching { primaryFocus.requestFocus() }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -73,7 +121,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp, vertical = 24.dp),
         ) {
             Header(enabled = state.enabled, docked = state.docked, loading = state.loading)
@@ -153,7 +201,9 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                     else -> "Turn On Automatic Mirror"
                 },
                 stop = state.autoMirrorEnabled,
-                enabled = !state.busy,
+                focusRequester = primaryFocus,
+                // The ViewModel ignores presses while busy, so the button can stay focusable
+                // (a disabled control would drop D-pad focus mid-toggle).
                 onClick = { viewModel.toggleAutoMirrorEnabled(!state.autoMirrorEnabled) },
             )
         }
@@ -216,17 +266,36 @@ private fun DeviceCard(
     onClick: (() -> Unit)?,
 ) {
     val selected = device != null
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(14.dp)
     Column(
         modifier = modifier
             .heightIn(min = 164.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (selected) Palette.surfaceRaised else Palette.surface)
-            .border(
-                width = 1.dp,
-                color = if (selected) Palette.borderStrong else Palette.border,
-                shape = RoundedCornerShape(14.dp),
+            .clip(shape)
+            .background(
+                when {
+                    focused -> Palette.focusBg
+                    selected -> Palette.surfaceRaised
+                    else -> Palette.surface
+                },
             )
-            .let { if (onClick != null) it.clickable(enabled = enabled) { onClick() } else it }
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = when {
+                    focused -> Palette.focus
+                    selected -> Palette.borderStrong
+                    else -> Palette.border
+                },
+                shape = shape,
+            )
+            .let {
+                if (onClick != null) {
+                    it.clickable(interactionSource = interaction, indication = null, enabled = enabled) { onClick() }
+                } else {
+                    it
+                }
+            }
             .padding(horizontal = 14.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
@@ -256,14 +325,21 @@ private fun SettingRow(
     enabled: Boolean,
     onCheckedChange: (Boolean) -> Unit,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(14.dp)
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 74.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Palette.surface)
-            .border(1.dp, Palette.border, RoundedCornerShape(14.dp))
-            .clickable(enabled = enabled) { onCheckedChange(!checked) }
+            .clip(shape)
+            .background(if (focused) Palette.focusBg else Palette.surface)
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = if (focused) Palette.focus else Palette.border,
+                shape = shape,
+            )
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled) { onCheckedChange(!checked) }
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -288,15 +364,32 @@ private fun SettingRow(
 }
 
 @Composable
-private fun PrimaryButton(text: String, stop: Boolean, enabled: Boolean, onClick: () -> Unit) {
+private fun PrimaryButton(
+    text: String,
+    stop: Boolean,
+    focusRequester: FocusRequester,
+    onClick: () -> Unit,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(10.dp)
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 52.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .focusRequester(focusRequester)
+            .clip(shape)
             .background(if (stop) Color(0xFF56232B) else Color(0xFF11486A))
-            .border(1.dp, if (stop) Color(0xFF8F3F4A) else Palette.borderStrong, RoundedCornerShape(10.dp))
-            .clickable(enabled = enabled) { onClick() }
+            .border(
+                width = if (focused) 2.dp else 1.dp,
+                color = when {
+                    focused -> Palette.focus
+                    stop -> Color(0xFF8F3F4A)
+                    else -> Palette.borderStrong
+                },
+                shape = shape,
+            )
+            .clickable(interactionSource = interaction, indication = null) { onClick() }
             .padding(vertical = 14.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -350,13 +443,16 @@ private fun InternalControllerPicker(
 
 @Composable
 private fun PickerOption(name: String, selected: Boolean, onClick: () -> Unit) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 58.dp)
             .clip(RoundedCornerShape(8.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 4.dp),
+            .background(if (focused) Palette.focusBg else Color.Transparent)
+            .clickable(interactionSource = interaction, indication = null) { onClick() }
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
