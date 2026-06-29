@@ -43,7 +43,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.text.font.FontWeight
@@ -67,20 +69,46 @@ private fun Context.findMainActivity(): MainActivity? {
     return null
 }
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun MirrorScreen(viewModel: MirrorViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var pickerOpen by remember { mutableStateOf(false) }
+    // Initial gamepad focus prefers the first control (the Local Controller card) and falls back to
+    // the always-present primary button for when the card isn't focusable (mirror on / busy).
+    val topFocus = remember { FocusRequester() }
     val primaryFocus = remember { FocusRequester() }
     val scrollState = rememberScrollState()
 
-    // Bridge the Activity's analog-stick handler to this screen's scroll state so the left stick
+    // Bridge the Activity's analog-stick handler to this screen's scroll state so the right stick
     // free-scrolls the whole page (header included), independent of which control has focus.
     val context = LocalContext.current
     DisposableEffect(context, scrollState) {
         val activity = context.findMainActivity()
         activity?.scrollConsumer = { delta -> scrollState.dispatchRawDelta(delta) }
         onDispose { activity?.scrollConsumer = null }
+    }
+
+    // Anchor gamepad focus on the first control, leaving touch mode first. On a touchscreen handheld
+    // the window starts in Touch input mode, in which requestFocus() is a silent no-op and the D-pad
+    // and stick have no anchor to navigate from until a face button hands focus out.
+    val inputModeManager = LocalInputModeManager.current
+    val anchorFocus = remember(inputModeManager, topFocus, primaryFocus) {
+        {
+            inputModeManager.requestInputMode(InputMode.Keyboard)
+            if (runCatching { topFocus.requestFocus() }.isFailure) {
+                runCatching { primaryFocus.requestFocus() }
+            }
+        }
+    }
+
+    // Re-anchor the instant the window gains focus. The launch-time effect below can lose the race
+    // when the window isn't focused yet (e.g. while controllers are scanned), so without this the
+    // D-pad/stick have no focus to move from until a button press hands it out.
+    DisposableEffect(context, anchorFocus) {
+        val activity = context.findMainActivity()
+        activity?.onWindowFocused = anchorFocus
+        onDispose { activity?.onWindowFocused = null }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -94,22 +122,23 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Give the gamepad a focus anchor on launch so the D-pad works immediately, even when the
-    // mirror locks every other control and the primary button is the only focusable target.
-    // Retry across a few frames because the focus node may not be placed on the first pass.
+    // Give the gamepad a focus anchor on launch so the D-pad works immediately. Retry across a few
+    // frames because the focus node may not be placed on the first pass; stop once we have switched
+    // to keyboard input mode (touch mode left), at which point the anchor has taken hold.
     LaunchedEffect(Unit) {
         repeat(10) {
-            if (runCatching { primaryFocus.requestFocus() }.isSuccess) return@LaunchedEffect
+            anchorFocus()
+            if (inputModeManager.inputMode == InputMode.Keyboard) return@LaunchedEffect
             delay(50)
         }
     }
 
     // When a state change disables whatever had focus — toggling the mirror briefly makes the
     // button busy, and starting/stopping it locks the cards and rows — Compose clears focus and
-    // the D-pad has nothing to navigate from. Send focus back to the always-focusable button so
-    // gamepad navigation keeps working after every transition.
+    // the D-pad has nothing to navigate from. Re-anchor to the first available control so gamepad
+    // navigation keeps working after every transition.
     LaunchedEffect(state.enabled, state.autoMirrorEnabled, state.busy) {
-        runCatching { primaryFocus.requestFocus() }
+        anchorFocus()
     }
 
     Box(
@@ -138,7 +167,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 DeviceCard(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).focusRequester(topFocus),
                     title = "Local Controller",
                     device = state.localDevice,
                     hint = when {
@@ -187,7 +216,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             if (!state.loading && !state.enabled && state.autoMirrorEnabled) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "The mirror starts automatically when the Odin controller and an external controller are available.",
+                    "The mirror starts automatically when the internal controller and an external controller are available.",
                     color = Palette.textMuted,
                     fontSize = 12.sp,
                 )
