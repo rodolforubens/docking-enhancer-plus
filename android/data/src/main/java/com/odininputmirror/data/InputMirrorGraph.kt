@@ -20,11 +20,13 @@ import com.odininputmirror.domain.usecase.StopMirrorUseCase
 class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
     private val appContext = context.applicationContext
 
-    // Prefer the no-root PServerBinder path where the firmware ships it (Odin/Thor/Retroid); fall
-    // back to a libsu root session everywhere else. Selecting PServer never touches libsu, so a
-    // supported handheld never triggers an su prompt.
-    private val shell: MirrorShell =
-        PServerShell(appContext).takeIf { it.isAvailable } ?: LibSuShell()
+    // The mirror runs entirely through the stock firmware's PServerBinder service (no root). On a
+    // device that doesn't ship it, [isSupportedDevice] is false and the app surfaces that instead
+    // of running.
+    private val shell: MirrorShell = PServerShell(appContext)
+
+    /** True when this device ships the PServerBinder service the mirror needs. */
+    val isSupportedDevice: Boolean get() = shell.isAvailable
 
     val settingsRepository: MirrorSettingsRepository = AndroidMirrorSettingsRepository(appContext)
     val dockStateRepository: DockStateRepository = AndroidDisplayDockStateRepository(appContext, forceDockMode)
@@ -54,3 +56,9 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
         mirrorSettingsRepository = settingsRepository,
     )
 }
+
+/**
+ * True when this device ships the PServerBinder service the mirror needs (no root). Lets the app
+ * module gate startup without constructing the full graph.
+ */
+fun isPServerSupported(): Boolean = PServerExec().isAvailable

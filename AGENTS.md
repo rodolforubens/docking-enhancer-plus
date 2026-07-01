@@ -4,13 +4,13 @@
 - Native Android (Kotlin) with Jetpack Compose + Material 3. No React Native.
 - Gradle 8.11.1, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, Java/JVM 17.
 - Compose BOM 2024.10.01, activity-compose 1.9.3, lifecycle 2.8.7.
-- Root via topjohnwu libsu 5.2.2 (JitPack). minSdk 28, target/compileSdk 35.
+- No root: privileged commands run through the stock firmware's PServerBinder service (reflection + binder transact). minSdk 28, target/compileSdk 35.
 - App id is `com.odininputmirror`. App label is `Docking Enhancer` (`strings.xml`).
 
 ## Repo layout that matters
 - Android multi-module project under `android/`.
-- `:app` — Compose UI + `MainActivity` (ComponentActivity) + `MainApplication` (plain Application, configures libsu) + supervisor service + boot receiver. UI lives in `android/app/src/main/java/com/odininputmirror/ui/`.
-- `:data` — Android/root/process impl (`InputMirrorGraph`, repositories, `Shell` wrapping libsu).
+- `:app` — Compose UI + `MainActivity` (ComponentActivity) + `MainApplication` (plain Application; starts the supervisor only when `isPServerSupported()`) + supervisor service + boot receiver. UI lives in `android/app/src/main/java/com/odininputmirror/ui/`.
+- `:data` — Android/process impl (`InputMirrorGraph`, repositories, `MirrorShell` → `PServerShell` over PServerBinder, `PServerExec`).
 - `:domain` — pure Kotlin use cases + interfaces + models.
 - Dependency direction is `app -> data -> domain`.
 - `MirrorViewModel` (in `:app` `ui`) wraps `InputMirrorGraph`, exposes a `MirrorUiState` StateFlow, and runs the 2s/6s status poll. `MirrorScreen` renders it.
@@ -25,10 +25,11 @@
 - Core mirroring is native C: `android/app/src/main/native/input_mirror.c`.
 - Build script `scripts/build-input-mirror.ps1` requires `ANDROID_NDK_HOME` and compiles with `aarch64-linux-android23-clang`.
 - Output must be `android/app/src/main/assets/input_mirror/input_mirror` (tracked intentionally via `.gitignore` exceptions).
-- At runtime Kotlin copies that asset to app files dir and executes it via libsu root shell (`RootMirrorProcessRepository`).
+- At runtime Kotlin copies that asset to app files dir and launches it via the no-root PServer shell (`RootMirrorProcessRepository` → `MirrorShell.launchDaemon`). The daemon runs foreground inside a backgrounded `sh` script — never `setsid`/inline `&` (input_mirror catches SIGHUP and would exit).
 
 ## Runtime/ops constraints
-- Root is required; mirroring writes directly to `/dev/input/eventX`. libsu requests su on first shell command.
+- No root. Privileged commands go through PServerBinder (`PServerShell`), which returns only the first stdout line and no exit code — reads stage output through a file, status checks use a stdout token. On devices without the service, `isPServerSupported()` is false: the UI shows an "Unsupported device" dialog and the supervisor idles.
+- Mirroring writes directly to `/dev/input/eventX` (the pservice SELinux domain can open input/uinput nodes).
 - Event node paths are unstable across reconnects/reboots; restart logic resolves by GUID first, then path (`RestartMirrorIfNeededUseCase`).
 - Auto-restart is handled by foreground service `InputMirrorSupervisorService` and only runs when `autoRestart` + `expectedRunning` are true.
 - Liveness is heartbeat/pid based in data layer (`RootMirrorProcessRepository` + process files), not just a simple process-name check.

@@ -7,7 +7,7 @@ import com.odininputmirror.domain.repository.InputDeviceRepository
 import java.io.File
 
 internal class AndroidInputDeviceRepository(
-    private val shell: MirrorShell = LibSuShell(),
+    private val shell: MirrorShell = UnavailableShell,
     private val pathExists: (String) -> Boolean = { File(it).exists() },
     private val manualInternalGuidProvider: () -> String? = { null },
 ) : InputDeviceRepository {

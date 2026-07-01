@@ -45,8 +45,15 @@ class InputMirrorSupervisorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun superviseMirror() {
+        // Without the PServerBinder service there is nothing to drive; surface it and stop the
+        // worker (the foreground notification stays as Unsupported).
+        if (!graph.isSupportedDevice) {
+            updateSupervisorState(SupervisorState.Unsupported)
+            return
+        }
+
         var nextRestartAllowedAt = 0L
-        var nextRootRetryAllowedAt = 0L
+        var nextStartRetryAllowedAt = 0L
         var sleepMs = SUPERVISOR_INTERVAL_MS
 
         while (running) {
@@ -70,7 +77,7 @@ class InputMirrorSupervisorService : Service() {
                     devices = devices,
                     settings = settings,
                     mirrorRunning = mirrorRunning,
-                    restartAllowed = now >= nextRestartAllowedAt && now >= nextRootRetryAllowedAt,
+                    restartAllowed = now >= nextRestartAllowedAt && now >= nextStartRetryAllowedAt,
                 )
 
                 when (decision) {
@@ -90,7 +97,7 @@ class InputMirrorSupervisorService : Service() {
                         sleepMs = SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS
                     }
                     AutoMirrorDecision.WaitingForRestartThrottle -> {
-                        if (supervisorState != SupervisorState.RootPermissionNeeded) {
+                        if (supervisorState != SupervisorState.MirrorStartFailed) {
                             updateSupervisorState(SupervisorState.Restarting)
                         }
                         sleepMs = SUPERVISOR_INTERVAL_MS
@@ -104,7 +111,7 @@ class InputMirrorSupervisorService : Service() {
                         if (startMirror(decision.request)) {
                             updateSupervisorState(SupervisorState.Active)
                         } else {
-                            nextRootRetryAllowedAt = now + ROOT_PERMISSION_RETRY_MS
+                            nextStartRetryAllowedAt = now + START_RETRY_BACKOFF_MS
                         }
                         nextRestartAllowedAt = now + RESTART_THROTTLE_MS
                         sleepMs = SUPERVISOR_INTERVAL_MS
@@ -115,7 +122,7 @@ class InputMirrorSupervisorService : Service() {
                         if (startMirror(decision.request)) {
                             updateSupervisorState(SupervisorState.Active)
                         } else {
-                            nextRootRetryAllowedAt = now + ROOT_PERMISSION_RETRY_MS
+                            nextStartRetryAllowedAt = now + START_RETRY_BACKOFF_MS
                         }
                         nextRestartAllowedAt = now + RESTART_THROTTLE_MS
                         sleepMs = SUPERVISOR_INTERVAL_MS
@@ -140,7 +147,7 @@ class InputMirrorSupervisorService : Service() {
             graph.startMirror(request)
             true
         }.getOrElse {
-            updateSupervisorState(SupervisorState.RootPermissionNeeded)
+            updateSupervisorState(SupervisorState.MirrorStartFailed)
             false
         }
     }
@@ -195,7 +202,8 @@ class InputMirrorSupervisorService : Service() {
         Starting("Starting dock mirror"),
         Active("Dock mirror active"),
         Restarting("Restarting dock mirror"),
-        RootPermissionNeeded("Open app to grant root"),
+        MirrorStartFailed("Could not start the mirror"),
+        Unsupported("This device is not supported"),
         Error("Mirror supervisor error"),
     }
 
@@ -207,6 +215,6 @@ class InputMirrorSupervisorService : Service() {
         private const val SUPERVISOR_WAITING_FOR_DEVICE_INTERVAL_MS = 6000L
         private const val SUPERVISOR_ERROR_INTERVAL_MS = 15000L
         private const val RESTART_THROTTLE_MS = 10000L
-        private const val ROOT_PERMISSION_RETRY_MS = 60000L
+        private const val START_RETRY_BACKOFF_MS = 60000L
     }
 }

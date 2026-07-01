@@ -27,6 +27,5 @@ android {
 
 dependencies {
     implementation project(":domain")
-    implementation "com.github.topjohnwu.libsu:core:5.2.2"
     testImplementation "junit:junit:4.13.2"
 }

@@ -32,6 +32,7 @@ data class MirrorUiState(
     val restartWaiting: Boolean = false,
     val docked: Boolean = false,
     val manualInternalGuid: String? = null,
+    val unsupported: Boolean = false,
 ) {
     // On a recognised handheld (e.g. Odin) the native layer flags the internal controller by
     // hardware signature and locks it. Otherwise the internal defaults to the first detected
@@ -53,15 +54,19 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private val idlePollMs = 6000L
 
     init {
-        startSupervisor()
-        viewModelScope.launch {
-            initialLoad()
-            while (true) {
-                val current = _state.value
-                val delayMs = if (current.enabled && !current.restartWaiting) idlePollMs else activePollMs
-                kotlinx.coroutines.delay(delayMs)
-                refresh(verifyWithRoot = false)
+        if (graph.isSupportedDevice) {
+            startSupervisor()
+            viewModelScope.launch {
+                initialLoad()
+                while (true) {
+                    val current = _state.value
+                    val delayMs = if (current.enabled && !current.restartWaiting) idlePollMs else activePollMs
+                    kotlinx.coroutines.delay(delayMs)
+                    refresh(verifyWithRoot = false)
+                }
             }
+        } else {
+            _state.update { it.copy(loading = false, unsupported = true) }
         }
     }
 

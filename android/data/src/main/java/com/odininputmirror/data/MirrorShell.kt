@@ -1,15 +1,14 @@
 package com.odininputmirror.data
 
 /**
- * Runs privileged shell commands for the mirror. Two backends implement it:
- *  - [LibSuShell]: a persistent `su` (root) session via libsu — the original path.
- *  - [PServerShell]: the stock firmware's PServerBinder service — no root required.
+ * Runs privileged shell commands for the mirror, implemented by [PServerShell] (the stock
+ * firmware's PServerBinder service — no root required).
  *
- * The two methods carve the callers into the shapes both backends can honor. PServer cannot
- * report an exit code and returns only the first line of stdout, so callers must not rely on
- * either: use [exec] when the result is irrelevant, and [read] (which stages full output through
- * a file on the PServer backend) when the command's stdout is needed. Success/failure that used
- * to be an exit code must become a token in the command's stdout.
+ * The methods are shaped around what PServer can honor: it cannot report an exit code and returns
+ * only the first line of stdout, so callers must not rely on either. Use [exec] when the result is
+ * irrelevant, [read] (which stages full output through a file) when stdout is needed, and
+ * [launchDaemon] to start the long-running mirror. Success/failure that used to be an exit code
+ * must become a token in the command's stdout.
  */
 internal interface MirrorShell {
     /** True when this backend can actually run privileged commands on this device. */
@@ -30,4 +29,15 @@ internal interface MirrorShell {
      * on-device via PServerProbe). The daemon is expected to write its own pid/heartbeat files.
      */
     fun launchDaemon(command: String)
+}
+
+/**
+ * No-op backend reported as unavailable. Used as the default when no real shell is injected (the
+ * graph always injects [PServerShell]); keeps repositories constructible in tests.
+ */
+internal object UnavailableShell : MirrorShell {
+    override val isAvailable: Boolean = false
+    override fun exec(command: String) {}
+    override fun read(command: String): String = ""
+    override fun launchDaemon(command: String) {}
 }

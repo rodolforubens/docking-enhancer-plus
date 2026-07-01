@@ -249,6 +249,34 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             onClose = { pickerOpen = false },
         )
     }
+
+    if (state.unsupported) {
+        UnsupportedDeviceDialog()
+    }
+}
+
+@Composable
+private fun UnsupportedDeviceDialog() {
+    // No dismiss handler: the mirror cannot run here, so the notice stays put.
+    Dialog(onDismissRequest = {}) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF1A2230))
+                .border(1.dp, Palette.border, RoundedCornerShape(14.dp))
+                .padding(horizontal = 24.dp, vertical = 22.dp),
+        ) {
+            Text("Unsupported device", color = Palette.danger, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "This app needs the built-in PServer service that ships on handhelds like the AYN Odin. " +
+                    "Your device doesn't have it, so the dock mirror can't run here.",
+                color = Palette.textSecondary,
+                fontSize = 14.sp,
+            )
+        }
+    }
 }
 
 @Composable

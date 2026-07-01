@@ -1,10 +1,10 @@
 # Odin Input Mirror
 
-Aplicacion Android nativa (Kotlin + Jetpack Compose) para clonar eventos de entrada desde un control externo Bluetooth hacia el dispositivo de entrada del joystick integrado en Android con root.
+Aplicacion Android nativa (Kotlin + Jetpack Compose) para clonar eventos de entrada desde un control externo Bluetooth hacia el dispositivo de entrada del joystick integrado en Android, **sin root**.
 
-Stack: Kotlin 2.0.21, Jetpack Compose + Material 3 (BOM 2024.10.01), Gradle 8.11.1, AGP 8.7.3, JVM 17, root via topjohnwu libsu 5.2.2 (JitPack). minSdk 28, target/compileSdk 35.
+Stack: Kotlin 2.0.21, Jetpack Compose + Material 3 (BOM 2024.10.01), Gradle 8.11.1, AGP 8.7.3, JVM 17. Sin root: los comandos privilegiados corren a traves del servicio PServerBinder del firmware (AYN Odin, etc.). minSdk 28, target/compileSdk 35.
 
-> Requiere root. Escribe directamente en `/dev/input/eventX`, por lo que debes verificar bien origen y destino antes de activar el espejo.
+> No requiere root, pero solo funciona en dispositivos que traen el servicio PServerBinder (handhelds tipo AYN Odin). En otros dispositivos la app muestra un aviso de "Unsupported device". Escribe directamente en `/dev/input/eventX`.
 
 ## Estructura
 
@@ -22,7 +22,7 @@ Stack: Kotlin 2.0.21, Jetpack Compose + Material 3 (BOM 2024.10.01), Gradle 8.11
 │   │       │   └── ui/   # MirrorScreen, MirrorViewModel, theme
 │   │       ├── assets/input_mirror/input_mirror
 │   │       └── native/input_mirror.c
-│   ├── data/       # InputMirrorGraph, repos, Shell (libsu)
+│   ├── data/       # InputMirrorGraph, repos, MirrorShell/PServerShell (PServerBinder, no root)
 │   └── domain/     # use cases + interfaces + models (Kotlin puro)
 └── scripts/build-input-mirror.ps1
 ```
@@ -55,10 +55,10 @@ El script compila `android/app/src/main/native/input_mirror.c` para `arm64-v8a` 
 android/app/src/main/assets/input_mirror/input_mirror
 ```
 
-En tiempo de ejecucion, el modulo Kotlin copia ese asset a `filesDir/bin/input_mirror`, le aplica `chmod 755` y lo ejecuta vía la sesion root de libsu:
+En tiempo de ejecucion, el modulo Kotlin copia ese asset a `filesDir/bin/input_mirror`, le aplica `chmod 755` y lo lanza como daemon a traves del servicio PServerBinder (sin root). Corre en foreground dentro de un `sh` script en segundo plano (no `setsid` ni `&` inline, porque el binario captura SIGHUP):
 
 ```sh
-nice -n -20 /data/data/<paquete>/files/bin/input_mirror <source> <target> &
+nice -n -20 /data/data/<paquete>/files/bin/input_mirror <source> <target> --pid-file ... --heartbeat-file ...
 ```
 
 ## Notas operativas

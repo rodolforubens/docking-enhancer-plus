@@ -3,18 +3,16 @@ package com.odininputmirror
 import android.app.Application
 import android.content.Intent
 import android.os.Build
-import com.topjohnwu.superuser.Shell
+import com.odininputmirror.data.isPServerSupported
 
 class MainApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        Shell.enableVerboseLogging = BuildConfig.DEBUG
-        Shell.setDefaultBuilder(
-            Shell.Builder.create()
-                .setFlags(Shell.FLAG_MOUNT_MASTER)
-                .setTimeout(10),
-        )
-        startSupervisor()
+        // The mirror drives the stock firmware's PServerBinder service (no root). On devices that
+        // don't ship it there is nothing to supervise, so don't start the service at all.
+        if (isPServerSupported()) {
+            startSupervisor()
+        }
     }
 
     private fun startSupervisor() {

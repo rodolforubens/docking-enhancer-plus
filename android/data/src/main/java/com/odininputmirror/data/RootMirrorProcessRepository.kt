@@ -9,7 +9,7 @@ import java.io.File
 internal class RootMirrorProcessRepository(
     context: Context,
     private val mirrorSettingsRepository: MirrorSettingsRepository,
-    private val shell: MirrorShell = LibSuShell(),
+    private val shell: MirrorShell = UnavailableShell,
 ) : MirrorProcessRepository {
     private val files = InputMirrorFiles(context.applicationContext)
 
