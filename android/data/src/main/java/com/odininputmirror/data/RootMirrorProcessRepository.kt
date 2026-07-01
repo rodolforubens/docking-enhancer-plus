@@ -9,7 +9,7 @@ import java.io.File
 internal class RootMirrorProcessRepository(
     context: Context,
     private val mirrorSettingsRepository: MirrorSettingsRepository,
-    private val shell: Shell = Shell(),
+    private val shell: MirrorShell = LibSuShell(),
 ) : MirrorProcessRepository {
     private val files = InputMirrorFiles(context.applicationContext)
 
@@ -21,13 +21,16 @@ internal class RootMirrorProcessRepository(
         val comboHoldKillAppArg = if (request.comboHoldKillApp) " --combo-hold-kill-app" else ""
         val pidFileArg = " --pid-file ${files.pidFile.absolutePath.shellQuote()}"
         val heartbeatFileArg = " --heartbeat-file ${files.heartbeatFile.absolutePath.shellQuote()}"
+        // Foreground invocation only; launchDaemon backgrounds it appropriately per backend. The
+        // binary writes (and chmods) its own pid/heartbeat files via --pid-file/--heartbeat-file,
+        // so no `echo $! > pidfile` bookkeeping is needed here.
         val command =
-            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg$heartbeatFileArg >/dev/null 2>&1 & echo \$! > ${files.pidFile.absolutePath.shellQuote()}; chmod 666 ${files.pidFile.absolutePath.shellQuote()} ${files.heartbeatFile.absolutePath.shellQuote()}"
-        shell.runSu(command)
+            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg$heartbeatFileArg"
+        shell.launchDaemon(command)
     }
 
     override fun stop() {
-        shell.runSu(STOP_MIRROR_COMMAND)
+        shell.exec(STOP_MIRROR_COMMAND)
     }
 
     override fun isRunning(): Boolean {
@@ -60,8 +63,7 @@ internal class RootMirrorProcessRepository(
 
     override fun isRunningVerified(): Boolean {
         return runCatching {
-            shell.runSu(IS_MIRROR_RUNNING_COMMAND)
-            true
+            shell.read(IS_MIRROR_RUNNING_COMMAND).contains("RUNNING")
         }.getOrDefault(false)
     }
 

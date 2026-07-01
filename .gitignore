@@ -47,6 +47,7 @@ Thumbs.db
 
 # Local agent skills/config
 .agents/
+.claude/
 skills-lock.json
 
 # Temporary files

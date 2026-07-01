@@ -7,12 +7,12 @@ import com.odininputmirror.domain.repository.InputDeviceRepository
 import java.io.File
 
 internal class AndroidInputDeviceRepository(
-    private val shell: Shell = Shell(),
+    private val shell: MirrorShell = LibSuShell(),
     private val pathExists: (String) -> Boolean = { File(it).exists() },
     private val manualInternalGuidProvider: () -> String? = { null },
 ) : InputDeviceRepository {
     override fun getConnectedControllers(): List<ControllerDevice> {
-        val procEntries = shell.runShell("cat /proc/bus/input/devices")
+        val procEntries = shell.read("cat /proc/bus/input/devices")
             .split(Regex("\\n\\s*\\n"))
             .mapNotNull { parseProcInputBlock(it) }
 

@@ -53,7 +53,10 @@ internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
+// Emits the token RUNNING to stdout when a live (non-zombie) input_mirror exists, else STOPPED.
+// Uses a stdout token rather than an exit code because the PServer backend exposes neither the
+// exit code nor anything past the first stdout line via its transact reply.
 internal const val IS_MIRROR_RUNNING_COMMAND =
-    "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && exit 0; done; exit 1"
+    "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && { echo RUNNING; exit 0; }; done; echo STOPPED"
 internal const val STOP_MIRROR_COMMAND =
     "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"
