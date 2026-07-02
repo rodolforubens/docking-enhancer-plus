@@ -132,7 +132,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleHomeAsBack(nextValue: Boolean) {
         val current = _state.value
-        if (current.enabled || current.busy) return
+        if (current.autoMirrorEnabled || current.busy) return
         _state.update { it.copy(homeAsBack = nextValue) }
         viewModelScope.launch {
             try {
@@ -145,7 +145,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleComboHoldKillApp(nextValue: Boolean) {
         val current = _state.value
-        if (current.enabled || current.busy) return
+        if (current.autoMirrorEnabled || current.busy) return
         _state.update { it.copy(comboHoldKillApp = nextValue) }
         viewModelScope.launch {
             try {

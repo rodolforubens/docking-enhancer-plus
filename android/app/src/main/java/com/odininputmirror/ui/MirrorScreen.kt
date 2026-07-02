@@ -193,7 +193,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                 title = "Home as Back",
                 description = "External controller Home button acts as Back",
                 checked = state.homeAsBack,
-                enabled = !(state.enabled || state.busy),
+                enabled = !(state.autoMirrorEnabled || state.busy),
                 onCheckedChange = { viewModel.toggleHomeAsBack(it) },
             )
             Spacer(Modifier.height(12.dp))
@@ -201,7 +201,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                 title = "Select + Start closes app",
                 description = "Hold Select and Start for 3 seconds to close the current app",
                 checked = state.comboHoldKillApp,
-                enabled = !(state.enabled || state.busy),
+                enabled = !(state.autoMirrorEnabled || state.busy),
                 onCheckedChange = { viewModel.toggleComboHoldKillApp(it) },
             )
 
