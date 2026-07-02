@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.odininputmirror.InputMirrorSupervisorService
+import com.odininputmirror.MirrorStateStore
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MirrorStatus
@@ -47,29 +48,21 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private val _state = MutableStateFlow(MirrorUiState())
     val state: StateFlow<MirrorUiState> = _state.asStateFlow()
 
-    // Poll fast while a state change is imminent (waiting for a controller, or for the mirror to
-    // start/stop), and back off once the mirror is running steadily — this avoids draining the
-    // handheld battery with a constant 2s cadence.
-    private val activePollMs = 2000L
-    private val idlePollMs = 6000L
-
-    // Only poll PServer while the screen is in the foreground: the background supervisor service
-    // owns the mirror on its own, so a backgrounded UI polling the privileged service just wastes
-    // battery and binder traffic for a view nobody is looking at.
-    @Volatile
-    private var foreground = true
-
     init {
         if (graph.isSupportedDevice) {
             startSupervisor()
             viewModelScope.launch {
-                initialLoad()
-                while (true) {
-                    val current = _state.value
-                    val delayMs = if (current.enabled && !current.restartWaiting) idlePollMs else activePollMs
-                    kotlinx.coroutines.delay(delayMs)
-                    if (foreground) {
-                        refresh(verifyWithRoot = false)
+                // Cold start: the supervisor may not have published a snapshot yet, so read once
+                // directly to fill the screen immediately. Then observe the shared snapshot the
+                // supervisor keeps fresh — the UI no longer runs its own PServer poll loop in
+                // parallel with the service.
+                if (MirrorStateStore.snapshot.value == null) {
+                    initialLoad()
+                }
+                MirrorStateStore.snapshot.collect { snapshot ->
+                    if (snapshot != null) {
+                        applyStatus(snapshot.status, snapshot.devices)
+                        _state.update { it.copy(loading = false) }
                     }
                 }
             }
@@ -78,13 +71,10 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    // Pull a fresh reading immediately on resume so opening the app doesn't wait for the next
+    // supervisor tick; steady-state updates arrive through the observed snapshot.
     fun onResume() {
-        foreground = true
         viewModelScope.launch { refresh(verifyWithRoot = false) }
-    }
-
-    fun onPause() {
-        foreground = false
     }
 
     private suspend fun initialLoad() {

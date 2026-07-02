@@ -9,7 +9,10 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import com.odininputmirror.data.InputMirrorGraph
+import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
+import com.odininputmirror.domain.model.MirrorStatus
 import com.odininputmirror.domain.usecase.AutoMirrorDecision
 
 class InputMirrorSupervisorService : Service() {
@@ -60,8 +63,16 @@ class InputMirrorSupervisorService : Service() {
             try {
                 val now = System.currentTimeMillis()
                 val settings = graph.settingsRepository.getSettings()
+                val dockActive = graph.dockStateRepository.isDockActive()
+                // Read the controllers every tick regardless of dock state and publish them for the
+                // UI to observe — the screen shows connected controllers even undocked (for setup),
+                // while the auto-mirror decision below still uses the dock-gated list.
+                val allDevices = graph.inputDeviceRepository.getConnectedControllers()
+                val mirrorRunning = graph.processRepository.isRunning()
+                publishSnapshot(settings, dockActive, allDevices, mirrorRunning)
+
                 if (!settings.autoMirrorEnabled) {
-                    if (graph.processRepository.isRunning() || settings.expectedRunning) {
+                    if (mirrorRunning || settings.expectedRunning) {
                         runCatching { graph.stopMirror() }
                     }
                     updateSupervisorState(SupervisorState.Disabled)
@@ -69,9 +80,7 @@ class InputMirrorSupervisorService : Service() {
                     Thread.sleep(sleepMs)
                     continue
                 }
-                val dockActive = graph.dockStateRepository.isDockActive()
-                val devices = if (dockActive) graph.inputDeviceRepository.getConnectedControllers() else emptyList()
-                val mirrorRunning = graph.processRepository.isRunning()
+                val devices = if (dockActive) allDevices else emptyList()
                 val decision = graph.resolveAutoMirrorDecision(
                     dockActive = dockActive,
                     devices = devices,
@@ -140,6 +149,31 @@ class InputMirrorSupervisorService : Service() {
                 break
             }
         }
+    }
+
+    private fun publishSnapshot(
+        settings: MirrorSettings,
+        dockActive: Boolean,
+        devices: List<ControllerDevice>,
+        mirrorRunning: Boolean,
+    ) {
+        MirrorStateStore.publish(
+            devices = devices,
+            status = MirrorStatus(
+                running = mirrorRunning,
+                expectedRunning = settings.expectedRunning,
+                source = settings.source,
+                target = settings.target,
+                sourceGuid = settings.sourceGuid,
+                targetGuid = settings.targetGuid,
+                homeAsBack = settings.homeAsBack,
+                comboHoldKillApp = settings.comboHoldKillApp,
+                autoRestart = settings.autoRestart,
+                autoMirrorEnabled = settings.autoMirrorEnabled,
+                docked = dockActive,
+                manualInternalGuid = settings.manualInternalGuid,
+            ),
+        )
     }
 
     private fun startMirror(request: MirrorStartRequest): Boolean {
