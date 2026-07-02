@@ -24,8 +24,13 @@ internal class RootMirrorProcessRepository(
         // Foreground invocation only; launchDaemon backgrounds it appropriately per backend. The
         // binary writes (and chmods) its own pid/heartbeat files via --pid-file/--heartbeat-file,
         // so no `echo $! > pidfile` bookkeeping is needed here.
-        val command =
+        //
+        // Guard against launching a duplicate: if an input_mirror is already alive (e.g. a daemon
+        // that outlived a previous app session), bail out. The exclusive EVIOCGRAB would make the
+        // second instance exit anyway, but this avoids the doomed spawn entirely.
+        val launch =
             "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$pidFileArg$heartbeatFileArg"
+        val command = "pidof input_mirror >/dev/null 2>&1 && exit 0; $launch"
         shell.launchDaemon(command)
     }
 
