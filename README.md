@@ -36,10 +36,10 @@ It runs a small native daemon that reads the external controller and writes into
 
 ## Supported devices
 
-| Device                               | SoC                  | Android | Notes                           |
-| ------------------------------------ | -------------------- | ------- | ------------------------------- |
-| **AYN Odin 2 / Portal**              | Snapdragon 8 Gen 2/3 | 13 / 15 | Primary target, hardware-tested |
-| Other handhelds with `PServerBinder` | Qualcomm             | —       | Likely work; not tested         |
+| Device                               | SoC                | Android | Notes                           |
+| ------------------------------------ | ------------------ | ------- | ------------------------------- |
+| **AYN Odin 2 / Portal**              | Snapdragon 8 Gen 2 | 13      | Primary target, hardware-tested |
+| Other handhelds with `PServerBinder` | Qualcomm           | —       | Likely work; not tested         |
 
 > [!NOTE]
 > Support is gated at runtime purely on whether the `PServerBinder` service exists — not on a model list — so any handheld that ships it has a good chance of working.
@@ -80,6 +80,7 @@ To stop for good, open the app and tap **Turn Off Automatic Mirror**.
 ## Notes and limitations
 
 - Event node paths (`/dev/input/eventX`) are unstable across reconnects and reboots; the app resolves controllers by GUID first, then path.
+- Controller GUIDs are derived from vendor + product only, so two identical controllers of the same model share a GUID and can't be told apart — an uncommon case on a handheld (typically one built-in plus one external of a different model).
 - "Home as Back" injects an Android Back key event at the framework level. Apps that read controllers directly via evdev (e.g. some emulators) may not react to it.
 - Writing directly to an internal controller's evdev node depends on the device exposing it that way; mirroring targets the built-in controller rather than creating a virtual `uinput` device.
 

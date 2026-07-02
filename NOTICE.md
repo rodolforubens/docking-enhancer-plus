@@ -1,7 +1,7 @@
 # Notices and attributions
 
 Docking Enhancer (Odin Input Mirror)
-Copyright (C) 2026 Ezequiel Carrizo
+Copyright (C) 2026 Ezequiel-CE
 
 This program is free software, distributed under the terms of the GNU General
 Public License v2.0. See [LICENSE](LICENSE) for the full text.
