@@ -58,6 +58,25 @@ static void handle_signal(int signal_number) {
     keep_running = 0;
 }
 
+/*
+ * Run a shell command WITHOUT blocking the mirror loop. A plain system() here would stall input
+ * forwarding for the whole duration of the command — `input keyevent` spins up an app_process (JVM)
+ * and `dumpsys`/`am` can take hundreds of ms — dropping controller events and, if long enough,
+ * starving the heartbeat into a false "dead" state. Forking lets the parent keep polling the source.
+ */
+static void run_detached(const char *command) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        return;
+    }
+    if (pid == 0) {
+        // Restore default SIGCHLD so system()'s internal waitpid works in the child.
+        signal(SIGCHLD, SIG_DFL);
+        _exit(system(command) == -1 ? EXIT_FAILURE : EXIT_SUCCESS);
+    }
+    // Parent: with SIGCHLD ignored (set in main) the child is auto-reaped; never wait on it.
+}
+
 static int write_full(int fd, const void *buffer, size_t length) {
     const unsigned char *cursor = (const unsigned char *)buffer;
     size_t remaining = length;
@@ -140,7 +159,7 @@ static long long now_ms(void) {
 }
 
 static void force_stop_foreground_app(void) {
-    system(
+    run_detached(
         "pkg=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
         "task=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{.* t\\([0-9][0-9]*\\)}.*/\\1/p' | head -n 1); "
         "[ -z \"$pkg\" ] && pkg=$(dumpsys window 2>/dev/null | sed -n 's/.*mFocusedApp=ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
@@ -224,6 +243,8 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
     signal(SIGHUP, handle_signal);
+    // Auto-reap the short-lived children spawned by run_detached so they never linger as zombies.
+    signal(SIGCHLD, SIG_IGN);
 
     int source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
     if (source_fd < 0) {
@@ -326,11 +347,13 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (event.type == EV_KEY && is_home_button(event.code)) {
-            if (home_as_back && event.value == 0) {
-                system("input keyevent 4");
-                continue;
+        if (home_as_back && event.type == EV_KEY && is_home_button(event.code)) {
+            // Swallow the Home button entirely (press, repeat and release) so the target controller
+            // never sees a Home-down that never gets its matching up. Inject Back once, on release.
+            if (event.value == 0) {
+                run_detached("input keyevent 4");
             }
+            continue;
         }
 
         if (combo_hold_kill_app && event.type == EV_KEY && (is_select_button(event.code) || is_start_button(event.code))) {
