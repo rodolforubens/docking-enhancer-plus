@@ -53,6 +53,12 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private val activePollMs = 2000L
     private val idlePollMs = 6000L
 
+    // Only poll PServer while the screen is in the foreground: the background supervisor service
+    // owns the mirror on its own, so a backgrounded UI polling the privileged service just wastes
+    // battery and binder traffic for a view nobody is looking at.
+    @Volatile
+    private var foreground = true
+
     init {
         if (graph.isSupportedDevice) {
             startSupervisor()
@@ -62,7 +68,9 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                     val current = _state.value
                     val delayMs = if (current.enabled && !current.restartWaiting) idlePollMs else activePollMs
                     kotlinx.coroutines.delay(delayMs)
-                    refresh(verifyWithRoot = false)
+                    if (foreground) {
+                        refresh(verifyWithRoot = false)
+                    }
                 }
             }
         } else {
@@ -71,7 +79,12 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     }
 
     fun onResume() {
+        foreground = true
         viewModelScope.launch { refresh(verifyWithRoot = false) }
+    }
+
+    fun onPause() {
+        foreground = false
     }
 
     private suspend fun initialLoad() {

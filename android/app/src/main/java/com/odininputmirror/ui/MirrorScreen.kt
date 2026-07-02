@@ -114,8 +114,10 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.onResume()
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.onResume()
+                Lifecycle.Event.ON_PAUSE -> viewModel.onPause()
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
