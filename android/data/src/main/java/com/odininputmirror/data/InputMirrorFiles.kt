@@ -17,6 +17,17 @@ internal class InputMirrorFiles(private val context: Context) {
         }
 
         val target = File(binDir, "input_mirror")
+
+        // The bundled binary only changes when the app itself is updated, so skip re-extracting the
+        // asset on every mirror start: keep it if the installed copy is newer than the last package
+        // update.
+        val lastUpdate = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+        }.getOrDefault(0L)
+        if (target.exists() && target.length() > 0L && target.lastModified() >= lastUpdate) {
+            return target
+        }
+
         val temp = File(binDir, "input_mirror.tmp")
         context.assets.open("input_mirror/input_mirror").use { input ->
             temp.outputStream().use { output ->
@@ -38,12 +49,11 @@ internal class InputMirrorFiles(private val context: Context) {
     }
 
     fun prepareProcessFiles() {
-        pidFile.writeText("")
-        pidFile.setReadable(true, false)
-        pidFile.setWritable(true, false)
-        heartbeatFile.writeText("")
-        heartbeatFile.setReadable(true, false)
-        heartbeatFile.setWritable(true, false)
+        // Clear any stale pid/heartbeat from a previous run. Do NOT pre-create empty files: the
+        // daemon writes and chmods its own, and a freshly-touched heartbeat would otherwise read as
+        // "fresh" (recent mtime) before the daemon is even alive, masking a failed launch.
+        pidFile.delete()
+        heartbeatFile.delete()
     }
 
     fun clearProcessFiles() {

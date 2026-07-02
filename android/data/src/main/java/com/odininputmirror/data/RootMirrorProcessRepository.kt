@@ -73,7 +73,9 @@ internal class RootMirrorProcessRepository(
 
     private fun isHeartbeatFresh(): Boolean {
         val heartbeatFile = files.heartbeatFile
-        if (!heartbeatFile.exists()) {
+        // An empty file means the daemon touched nothing yet (or never started); treat it as not
+        // running rather than trusting a fresh mtime.
+        if (!heartbeatFile.exists() || heartbeatFile.length() == 0L) {
             return false
         }
 
