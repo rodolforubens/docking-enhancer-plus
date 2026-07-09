@@ -10,16 +10,8 @@ class GetMirrorStatusUseCase(
     private val mirrorSettingsRepository: MirrorSettingsRepository,
     private val dockStateRepository: DockStateRepository,
 ) {
-    operator fun invoke(verifyWithRoot: Boolean = false): MirrorStatus {
-        val running = if (verifyWithRoot) {
-            val verified = mirrorProcessRepository.isRunningVerified()
-            if (!verified) {
-                mirrorProcessRepository.clearProcessFiles()
-            }
-            verified
-        } else {
-            mirrorProcessRepository.isRunning()
-        }
+    operator fun invoke(): MirrorStatus {
+        val running = mirrorProcessRepository.isRunning()
         val settings = mirrorSettingsRepository.getSettings()
         return MirrorStatus(
             running = running,
@@ -31,7 +23,6 @@ class GetMirrorStatusUseCase(
             homeAsBack = settings.homeAsBack,
             comboHoldKillApp = settings.comboHoldKillApp,
             virtualMouse = settings.virtualMouse,
-            autoRestart = settings.autoRestart,
             autoMirrorEnabled = settings.autoMirrorEnabled,
             docked = dockStateRepository.isDockActive(),
             manualInternalGuid = settings.manualInternalGuid,

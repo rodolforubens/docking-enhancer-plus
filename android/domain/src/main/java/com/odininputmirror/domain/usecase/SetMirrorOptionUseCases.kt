@@ -19,9 +19,3 @@ class SetVirtualMouseEnabledUseCase(
 ) {
     operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setVirtualMouseEnabled(enabled)
 }
-
-class SetAutoRestartEnabledUseCase(
-    private val mirrorSettingsRepository: MirrorSettingsRepository,
-) {
-    operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setAutoRestartEnabled(enabled)
-}

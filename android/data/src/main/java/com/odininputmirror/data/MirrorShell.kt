@@ -14,8 +14,13 @@ internal interface MirrorShell {
     /** True when this backend can actually run privileged commands on this device. */
     val isAvailable: Boolean
 
-    /** Fire-and-forget: run [command] as root; stdout and success are ignored. */
-    fun exec(command: String)
+    /**
+     * Run [command] as root; stdout is ignored. Returns true when the command was DELIVERED to the
+     * backend — PServer reports no exit code, so this cannot say whether the command itself
+     * succeeded, only that the transact reached the service. False means the command certainly did
+     * not run (dead binder, unhandled transaction) and the caller must not assume any effect.
+     */
+    fun exec(command: String): Boolean
 
     /** Run [command] as root and return its full stdout (multi-line safe on both backends). */
     fun read(command: String): String
@@ -27,8 +32,11 @@ internal interface MirrorShell {
      * SIGHUP when the transact returns and input_mirror handles SIGHUP by exiting. The daemon must
      * run in the foreground under a live intermediate `sh` that is itself backgrounded (validated
      * on-device via PServerProbe). The daemon is expected to write its own pid/heartbeat files.
+     *
+     * Returns true when the launch was delivered (same delivery-only semantics as [exec]: whether
+     * the daemon then stayed alive is tracked separately via its pid/heartbeat files).
      */
-    fun launchDaemon(command: String)
+    fun launchDaemon(command: String): Boolean
 }
 
 /**
@@ -37,7 +45,7 @@ internal interface MirrorShell {
  */
 internal object UnavailableShell : MirrorShell {
     override val isAvailable: Boolean = false
-    override fun exec(command: String) {}
+    override fun exec(command: String): Boolean = false
     override fun read(command: String): String = ""
-    override fun launchDaemon(command: String) {}
+    override fun launchDaemon(command: String): Boolean = false
 }

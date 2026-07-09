@@ -39,7 +39,12 @@ class ResolveAutoMirrorDecisionUseCase {
             settings.targetGuid == local.guid &&
             settings.source == external.path &&
             settings.target == local.path
-        if (mirrorRunning && sameMirror) {
+        // The daemon reads its option flags once at launch; if a toggle changed them since, the
+        // running mirror is stale and must be restarted for the new flags to take effect.
+        val sameFlags = settings.startedHomeAsBack == settings.homeAsBack &&
+            settings.startedComboHoldKillApp == settings.comboHoldKillApp &&
+            settings.startedVirtualMouse == settings.virtualMouse
+        if (mirrorRunning && sameMirror && sameFlags) {
             return AutoMirrorDecision.Running
         }
         if (!restartAllowed) {

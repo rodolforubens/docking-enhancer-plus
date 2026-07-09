@@ -2,34 +2,44 @@ package com.odininputmirror.data
 
 import android.content.Context
 import java.io.File
+import java.io.InputStream
+import java.security.MessageDigest
 
-internal class InputMirrorFiles(private val context: Context) {
+internal class InputMirrorFiles(
+    private val filesDir: File,
+    private val openBinaryAsset: () -> InputStream,
+) {
+    constructor(context: Context) : this(
+        filesDir = context.filesDir,
+        openBinaryAsset = { context.assets.open(BINARY_ASSET_PATH) },
+    )
+
     val pidFile: File
-        get() = File(context.filesDir, "input_mirror.pid")
+        get() = File(filesDir, "input_mirror.pid")
 
     val heartbeatFile: File
-        get() = File(context.filesDir, "input_mirror.heartbeat")
+        get() = File(filesDir, "input_mirror.heartbeat")
 
     fun ensureBinaryInstalled(): File {
-        val binDir = File(context.filesDir, "bin")
+        val binDir = File(filesDir, "bin")
         if (!binDir.exists()) {
             binDir.mkdirs()
         }
 
         val target = File(binDir, "input_mirror")
 
-        // The bundled binary only changes when the app itself is updated, so skip re-extracting the
-        // asset on every mirror start: keep it if the installed copy is newer than the last package
-        // update.
-        val lastUpdate = runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
-        }.getOrDefault(0L)
-        if (target.exists() && target.length() > 0L && target.lastModified() >= lastUpdate) {
+        // Reuse the installed copy only when its content hashes equal to the bundled asset. The
+        // binary is executed AS ROOT, so a stale or tampered copy must never run: content hashing
+        // (rather than an mtime-vs-package-update shortcut) re-extracts on any mismatch. Mirror
+        // starts are rare (dock events), so hashing both sides is cheap.
+        val assetSha = openBinaryAsset().use { it.sha256() }
+        val installedSha = runCatching { target.inputStream().use { it.sha256() } }.getOrNull()
+        if (assetSha.contentEquals(installedSha)) {
             return target
         }
 
         val temp = File(binDir, "input_mirror.tmp")
-        context.assets.open("input_mirror/input_mirror").use { input ->
+        openBinaryAsset().use { input ->
             temp.outputStream().use { output ->
                 input.copyTo(output)
             }
@@ -60,4 +70,19 @@ internal class InputMirrorFiles(private val context: Context) {
         pidFile.delete()
         heartbeatFile.delete()
     }
+
+    private companion object {
+        const val BINARY_ASSET_PATH = "input_mirror/input_mirror"
+    }
+}
+
+private fun InputStream.sha256(): ByteArray {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) break
+        digest.update(buffer, 0, read)
+    }
+    return digest.digest()
 }

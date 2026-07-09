@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MirrorSettings
@@ -137,8 +138,13 @@ class InputMirrorSupervisorService : Service() {
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }
                 }
-            } catch (_: Exception) {
+            } catch (interrupted: InterruptedException) {
+                // onDestroy interrupted us mid-tick (e.g. during shell IO); exit without publishing
+                // a stale Error notification for a service that is already gone.
+                break
+            } catch (failure: Exception) {
                 // Keep the supervisor alive; transient root/device failures are expected during reconnects.
+                Log.w(TAG, "Supervisor tick failed", failure)
                 updateSupervisorState(SupervisorState.Error)
                 sleepMs = SUPERVISOR_ERROR_INTERVAL_MS
             }
@@ -169,7 +175,6 @@ class InputMirrorSupervisorService : Service() {
                 homeAsBack = settings.homeAsBack,
                 comboHoldKillApp = settings.comboHoldKillApp,
                 virtualMouse = settings.virtualMouse,
-                autoRestart = settings.autoRestart,
                 autoMirrorEnabled = settings.autoMirrorEnabled,
                 docked = dockActive,
                 manualInternalGuid = settings.manualInternalGuid,
@@ -181,7 +186,8 @@ class InputMirrorSupervisorService : Service() {
         return runCatching {
             graph.startMirror(request)
             true
-        }.getOrElse {
+        }.getOrElse { failure ->
+            Log.w(TAG, "Mirror start failed for ${request.source} -> ${request.target}", failure)
             updateSupervisorState(SupervisorState.MirrorStartFailed)
             false
         }
@@ -243,6 +249,7 @@ class InputMirrorSupervisorService : Service() {
     }
 
     companion object {
+        private const val TAG = "InputMirrorSupervisor"
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFICATION_CHANNEL_ID = "input_mirror_supervisor"
         private const val SUPERVISOR_INTERVAL_MS = 2500L

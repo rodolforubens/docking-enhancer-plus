@@ -1,6 +1,7 @@
 package com.odininputmirror.data
 
 import android.content.Context
+import android.util.Log
 import java.io.File
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -27,9 +28,7 @@ internal class PServerShell(
 
     override val isAvailable: Boolean get() = pserver.isAvailable
 
-    override fun exec(command: String) {
-        transact(command)
-    }
+    override fun exec(command: String): Boolean = transact(command)
 
     override fun read(command: String): String {
         val out = File(appContext.filesDir, STAGE_FILE)
@@ -37,28 +36,45 @@ internal class PServerShell(
         // Redirect the real output to a file (dodging the first-line-only reply) and make it
         // app-readable. The command runs in a subshell so the redirect captures ALL of its output,
         // not just its last simple command. No exit code is available; an empty file means the
-        // command produced nothing.
-        transact("($command) > $outQ 2>/dev/null; chmod 666 $outQ")
+        // command produced nothing. 644: the app only ever READS this root-owned file back.
+        transact("($command) > $outQ 2>/dev/null; chmod 644 $outQ")
         return runCatching { out.readText() }.getOrDefault("")
     }
 
-    override fun launchDaemon(command: String) {
+    override fun launchDaemon(command: String): Boolean {
         // Run the daemon in the FOREGROUND inside a script, then background the whole `sh`. A direct
         // `bin &` gets SIGHUP'd when the transact returns (input_mirror catches SIGHUP → exits); an
         // intermediate live `sh` keeps it alive. Do NOT use setsid — a session leader also gets
         // SIGHUP'd. Validated on-device (PServerProbe plain-script strategy).
+        // Write to a temp file and atomically rename over the real script. A plain writeText would
+        // truncate/rewrite the SAME inode a still-starting `sh` from a previous launch may be
+        // mid-reading (sh reads its script incrementally) — the rename gives the new launch a fresh
+        // inode while any old reader keeps its own.
         val launcher = File(appContext.filesDir, DAEMON_SCRIPT)
-        launcher.writeText("$command >/dev/null 2>&1\n")
-        launcher.setReadable(true, false)
-        launcher.setExecutable(true, false)
-        transact("sh ${launcher.absolutePath.shellQuote()} </dev/null >/dev/null 2>&1 &")
+        val staging = File(appContext.filesDir, "$DAEMON_SCRIPT.tmp")
+        staging.writeText("$command >/dev/null 2>&1\n")
+        staging.setReadable(true, false)
+        staging.setExecutable(true, false)
+        if (!staging.renameTo(launcher)) {
+            // Same-directory rename should never fail; if it somehow does, fall back to the direct
+            // write rather than not launching at all.
+            launcher.writeText("$command >/dev/null 2>&1\n")
+            launcher.setReadable(true, false)
+            launcher.setExecutable(true, false)
+            staging.delete()
+        }
+        return transact("sh ${launcher.absolutePath.shellQuote()} </dev/null >/dev/null 2>&1 &")
     }
 
-    private fun transact(command: String): String? = lock.withLock {
-        pserver.executeAsRoot(command).getOrNull()
+    // True when the transact reached the service (delivery only — PServer exposes no exit code).
+    private fun transact(command: String): Boolean = lock.withLock {
+        pserver.executeAsRoot(command)
+            .onFailure { Log.w(TAG, "PServer transact failed", it) }
+            .isSuccess
     }
 
     private companion object {
+        const val TAG = "PServerShell"
         const val STAGE_FILE = "pserver_read.out"
         const val DAEMON_SCRIPT = "pserver_daemon.sh"
         // PServerBinder cannot handle concurrent transacts; serialize all callers process-wide.

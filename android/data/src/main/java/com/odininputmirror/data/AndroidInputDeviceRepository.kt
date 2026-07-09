@@ -2,7 +2,6 @@ package com.odininputmirror.data
 
 import android.view.InputDevice
 import com.odininputmirror.domain.model.ControllerDevice
-import com.odininputmirror.domain.model.findSavedControllerDevice
 import com.odininputmirror.domain.repository.InputDeviceRepository
 import java.io.File
 
@@ -58,12 +57,6 @@ internal class AndroidInputDeviceRepository(
             if (device.path == first.path) device.copy(isInternal = true) else device
         }
     }
-
-    override fun findSavedDevice(
-        path: String?,
-        guid: String?,
-        devices: List<ControllerDevice>,
-    ): ControllerDevice? = devices.findSavedControllerDevice(path = path, guid = guid)
 
     // Some handhelds (e.g. the Odin) re-expose any active controller as a virtual HID node
     // carrying the handheld's own vendor id, for game-compatibility reasons. Such a mirrored

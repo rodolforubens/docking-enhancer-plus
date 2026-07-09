@@ -46,18 +46,16 @@ internal const val KEY_TARGET_GUID = "target_guid"
 internal const val KEY_HOME_AS_BACK = "home_as_back"
 internal const val KEY_COMBO_HOLD_KILL_APP = "combo_hold_kill_app"
 internal const val KEY_VIRTUAL_MOUSE = "virtual_mouse"
-internal const val KEY_AUTO_RESTART = "auto_restart"
 internal const val KEY_AUTO_MIRROR_ENABLED = "auto_mirror_enabled"
+// Flags the running daemon was launched with (see MirrorSettings.startedHomeAsBack docs).
+internal const val KEY_STARTED_HOME_AS_BACK = "started_home_as_back"
+internal const val KEY_STARTED_COMBO_HOLD_KILL_APP = "started_combo_hold_kill_app"
+internal const val KEY_STARTED_VIRTUAL_MOUSE = "started_virtual_mouse"
 internal const val KEY_EXPECTED_RUNNING = "expected_running"
 internal const val KEY_STARTED_AT = "started_at"
 internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
-// Emits the token RUNNING to stdout when a live (non-zombie) input_mirror exists, else STOPPED.
-// Uses a stdout token rather than an exit code because the PServer backend exposes neither the
-// exit code nor anything past the first stdout line via its transact reply.
-internal const val IS_MIRROR_RUNNING_COMMAND =
-    "for pid in \$(pidof input_mirror 2>/dev/null); do state=\$(cat /proc/\$pid/stat 2>/dev/null | awk '{print \$3}'); [ \"\$state\" != \"Z\" ] && { echo RUNNING; exit 0; }; done; echo STOPPED"
 internal const val STOP_MIRROR_COMMAND =
     "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"

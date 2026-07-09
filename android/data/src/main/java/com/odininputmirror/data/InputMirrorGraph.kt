@@ -7,9 +7,7 @@ import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 import com.odininputmirror.domain.usecase.GetConnectedDevicesUseCase
 import com.odininputmirror.domain.usecase.GetMirrorStatusUseCase
-import com.odininputmirror.domain.usecase.RestartMirrorIfNeededUseCase
 import com.odininputmirror.domain.usecase.ResolveAutoMirrorDecisionUseCase
-import com.odininputmirror.domain.usecase.SetAutoRestartEnabledUseCase
 import com.odininputmirror.domain.usecase.SetAutoMirrorEnabledUseCase
 import com.odininputmirror.domain.usecase.SetComboHoldKillAppEnabledUseCase
 import com.odininputmirror.domain.usecase.SetHomeAsBackEnabledUseCase
@@ -36,8 +34,8 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
         manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },
     )
     val processRepository: MirrorProcessRepository = RootMirrorProcessRepository(
-        context = appContext,
         mirrorSettingsRepository = settingsRepository,
+        files = InputMirrorFiles(appContext),
         shell = shell,
     )
 
@@ -48,15 +46,9 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
     val setHomeAsBackEnabled = SetHomeAsBackEnabledUseCase(settingsRepository)
     val setComboHoldKillAppEnabled = SetComboHoldKillAppEnabledUseCase(settingsRepository)
     val setVirtualMouseEnabled = SetVirtualMouseEnabledUseCase(settingsRepository)
-    val setAutoRestartEnabled = SetAutoRestartEnabledUseCase(settingsRepository)
     val setAutoMirrorEnabled = SetAutoMirrorEnabledUseCase(settingsRepository)
     val setManualInternalController = SetManualInternalControllerUseCase(settingsRepository)
     val resolveAutoMirrorDecision = ResolveAutoMirrorDecisionUseCase()
-    val restartMirrorIfNeeded = RestartMirrorIfNeededUseCase(
-        inputDeviceRepository = inputDeviceRepository,
-        mirrorProcessRepository = processRepository,
-        mirrorSettingsRepository = settingsRepository,
-    )
 }
 
 /**

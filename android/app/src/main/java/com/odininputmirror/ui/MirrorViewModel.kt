@@ -11,6 +11,7 @@ import com.odininputmirror.MirrorStateStore
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MirrorStatus
+import com.odininputmirror.domain.model.findSavedControllerDevice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -75,7 +76,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     // Pull a fresh reading immediately on resume so opening the app doesn't wait for the next
     // supervisor tick; steady-state updates arrive through the observed snapshot.
     fun onResume() {
-        viewModelScope.launch { refresh(verifyWithRoot = false) }
+        viewModelScope.launch { refresh() }
     }
 
     private suspend fun initialLoad() {
@@ -91,10 +92,10 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
-    private suspend fun refresh(verifyWithRoot: Boolean) {
+    private suspend fun refresh() {
         try {
             val (devices, status) = withContext(Dispatchers.IO) {
-                graph.getConnectedDevices() to graph.getMirrorStatus(verifyWithRoot)
+                graph.getConnectedDevices() to graph.getMirrorStatus()
             }
             applyStatus(status, devices)
         } catch (_: Exception) {
@@ -135,9 +136,11 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    // Option toggles only persist the setting; if the mirror is running with different flags the
+    // supervisor notices (started* snapshot vs current settings) and restarts it automatically.
     fun toggleHomeAsBack(nextValue: Boolean) {
         val current = _state.value
-        if (current.autoMirrorEnabled || current.busy) return
+        if (current.busy) return
         _state.update { it.copy(homeAsBack = nextValue) }
         viewModelScope.launch {
             try {
@@ -150,7 +153,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleComboHoldKillApp(nextValue: Boolean) {
         val current = _state.value
-        if (current.autoMirrorEnabled || current.busy) return
+        if (current.busy) return
         _state.update { it.copy(comboHoldKillApp = nextValue) }
         viewModelScope.launch {
             try {
@@ -197,7 +200,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
             try {
                 withContext(Dispatchers.IO) { graph.setManualInternalController(guid) }
                 _state.update { it.copy(manualInternalGuid = guid) }
-                refresh(verifyWithRoot = false)
+                refresh()
             } catch (error: Exception) {
                 _state.update { it.copy(message = error.message ?: error.toString()) }
             } finally {
@@ -208,7 +211,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     fun toggleVirtualMouse(nextValue: Boolean) {
         val current = _state.value
-        if (current.autoMirrorEnabled || current.busy) return
+        if (current.busy) return
         _state.update { it.copy(virtualMouse = nextValue) }
         viewModelScope.launch {
             try {
@@ -240,27 +243,13 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private fun savedIdentityMatches(path: String?, guid: String?, device: ControllerDevice): Boolean =
         (guid != null && device.guid == guid) || (path != null && device.path == path)
 
-    private fun findDeviceBySavedIdentity(
-        path: String?,
-        guid: String?,
-        devices: List<ControllerDevice>,
-    ): ControllerDevice? {
-        if (!guid.isNullOrEmpty()) {
-            devices.firstOrNull { it.guid == guid }?.let { return it }
-        }
-        if (!path.isNullOrEmpty()) {
-            return devices.firstOrNull { it.path == path }
-        }
-        return null
-    }
-
     private fun deviceFromSavedIdentity(
         path: String?,
         guid: String?,
         devices: List<ControllerDevice>,
         fallbackName: String,
     ): ControllerDevice? {
-        findDeviceBySavedIdentity(path, guid, devices)?.let { return it }
+        devices.findSavedControllerDevice(path = path, guid = guid)?.let { return it }
         if (path.isNullOrEmpty() && guid.isNullOrEmpty()) return null
         return ControllerDevice(
             name = fallbackName,

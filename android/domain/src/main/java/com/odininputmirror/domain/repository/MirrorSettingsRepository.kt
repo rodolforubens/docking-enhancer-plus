@@ -11,7 +11,6 @@ interface MirrorSettingsRepository {
     fun setHomeAsBackEnabled(enabled: Boolean)
     fun setComboHoldKillAppEnabled(enabled: Boolean)
     fun setVirtualMouseEnabled(enabled: Boolean)
-    fun setAutoRestartEnabled(enabled: Boolean)
     fun setAutoMirrorEnabled(enabled: Boolean)
     fun setManualInternalController(guid: String?)
 }

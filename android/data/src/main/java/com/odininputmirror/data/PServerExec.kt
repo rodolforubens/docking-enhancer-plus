@@ -1,6 +1,7 @@
 package com.odininputmirror.data
 
 import android.annotation.SuppressLint
+import android.os.DeadObjectException
 import android.os.IBinder
 import android.os.Parcel
 import java.nio.charset.Charset
@@ -25,17 +26,31 @@ import java.nio.charset.Charset
 @SuppressLint("DiscouragedPrivateApi", "PrivateApi")
 internal class PServerExec {
 
-    private val binder: IBinder? = runCatching {
+    // The binder is cached but NOT immortal: if the firmware service restarts, the old IBinder goes
+    // dead and every transact would fail forever. [binder] re-resolves a dead/missing handle so the
+    // mirror recovers instead of silently failing until the app process is killed.
+    @Volatile
+    private var cachedBinder: IBinder? = null
+
+    val isAvailable: Boolean get() = binder() != null
+
+    private fun binder(): IBinder? {
+        val current = cachedBinder
+        if (current != null && current.isBinderAlive) {
+            return current
+        }
+        return resolveBinder().also { cachedBinder = it }
+    }
+
+    private fun resolveBinder(): IBinder? = runCatching {
         val serviceManager = Class.forName("android.os.ServiceManager")
         val getService = serviceManager.getDeclaredMethod("getService", String::class.java)
-        getService.invoke(null, SERVICE_NAME) as IBinder
+        getService.invoke(null, SERVICE_NAME) as? IBinder
     }.getOrNull()
-
-    val isAvailable: Boolean get() = binder != null
 
     /** Runs [command] through PServer as root and returns its stdout, or a failure. */
     fun executeAsRoot(command: String): Result<String?> {
-        val target = binder ?: return Result.failure(IllegalStateException("$SERVICE_NAME not available"))
+        val target = binder() ?: return Result.failure(IllegalStateException("$SERVICE_NAME not available"))
 
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
@@ -43,9 +58,17 @@ internal class PServerExec {
             // Second element "1" is PULSE's run-as-root flag; kept identical to match the service's
             // expected argument shape.
             data.writeStringArray(arrayOf(command, "1"))
-            target.transact(TRANSACTION_EXEC, data, reply, 0)
-            Result.success(decodeReply(reply))
+            val handled = target.transact(TRANSACTION_EXEC, data, reply, 0)
+            if (handled) {
+                Result.success(decodeReply(reply))
+            } else {
+                Result.failure(IllegalStateException("$SERVICE_NAME did not handle the exec transaction"))
+            }
         } catch (throwable: Throwable) {
+            if (throwable is DeadObjectException) {
+                // Drop the dead handle so the next call re-resolves the (possibly restarted) service.
+                cachedBinder = null
+            }
             Result.failure(throwable)
         } finally {
             data.recycle()

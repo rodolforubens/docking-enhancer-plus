@@ -30,10 +30,10 @@
 ## Runtime/ops constraints
 - No root. Privileged commands go through PServerBinder (`PServerShell`), which returns only the first stdout line and no exit code — reads stage output through a file, status checks use a stdout token. On devices without the service, `isPServerSupported()` is false: the UI shows an "Unsupported device" dialog and the supervisor idles.
 - Mirroring writes directly to `/dev/input/eventX` (the pservice SELinux domain can open input/uinput nodes).
-- Event node paths are unstable across reconnects/reboots; restart logic resolves by GUID first, then path (`RestartMirrorIfNeededUseCase`).
-- Auto-restart is handled by foreground service `InputMirrorSupervisorService` and only runs when `autoRestart` + `expectedRunning` are true.
+- Event node paths are unstable across reconnects/reboots; device resolution matches by GUID first, then path (`findSavedControllerDevice`).
+- Start/stop/restart is decided every tick by `ResolveAutoMirrorDecisionUseCase`, driven from the foreground service `InputMirrorSupervisorService`; it only acts while `autoMirrorEnabled` is true and the device is docked.
 - Liveness is heartbeat/pid based in data layer (`RootMirrorProcessRepository` + process files), not just a simple process-name check.
-- Toggling the UI switches (`homeAsBack`, `comboHoldKillApp`) must only persist settings; the mirror starts/stops via the supervisor and `startMirror`/`stopMirror`.
+- Toggling the UI switches (`homeAsBack`, `comboHoldKillApp`, `virtualMouse`) must only persist settings; the mirror starts/stops via the supervisor and `startMirror`/`stopMirror`. If the mirror is running with different flags, the supervisor detects it (persisted `started*` snapshot vs current settings) and restarts it automatically.
 
 ## Known install quirk on Odin
 - Install may fail with `Failed to parse APK file` / `avc ... Permission denied` even when build succeeds.

@@ -213,7 +213,9 @@ static int write_pid_file(const char *pid_file_path) {
 
     fprintf(pid_file, "%ld\n", (long)getpid());
     fclose(pid_file);
-    chmod(pid_file_path, 0666);
+    // 644: the app only ever READS these root-owned files back (delete goes through the
+    // app-owned parent directory, which needs no write bit on the file itself).
+    chmod(pid_file_path, 0644);
     return 0;
 }
 
@@ -230,7 +232,7 @@ static int write_heartbeat_file(const char *heartbeat_file_path) {
 
     fprintf(heartbeat_file, "%lld\n", now_ms());
     fclose(heartbeat_file);
-    chmod(heartbeat_file_path, 0666);
+    chmod(heartbeat_file_path, 0644);
     return 0;
 }
 
@@ -498,6 +500,21 @@ int main(int argc, char **argv) {
     memset(&left_y, 0, sizeof(left_y));
     memset(&right_x, 0, sizeof(right_x));
     memset(&right_y, 0, sizeof(right_y));
+
+    // Everything the target currently believes held/deflected, tracked as events are forwarded.
+    // Entering mouse mode releases ALL of it — not just the toggle-combo keys — so a button or
+    // trigger held at entry can't stay stuck on the target for the whole mouse session. Axis
+    // "neutral" is the value sampled at startup (controller assumed at rest): stick center, or a
+    // trigger's minimum — a computed midpoint would half-press a trigger.
+    unsigned char key_down[KEY_CNT];
+    int abs_present[ABS_CNT];
+    int abs_neutral[ABS_CNT];
+    int abs_last[ABS_CNT];
+    memset(key_down, 0, sizeof(key_down));
+    memset(abs_present, 0, sizeof(abs_present));
+    memset(abs_neutral, 0, sizeof(abs_neutral));
+    memset(abs_last, 0, sizeof(abs_last));
+
     if (virtual_mouse) {
         query_axis(source_fd, &left_x, ABS_X);
         query_axis(source_fd, &left_y, ABS_Y);
@@ -506,6 +523,24 @@ int main(int argc, char **argv) {
         if (!right_x.present || !right_y.present) {
             query_axis(source_fd, &right_x, ABS_Z);
             query_axis(source_fd, &right_y, ABS_RZ);
+        }
+
+        unsigned long abs_bits[(ABS_CNT + 8 * sizeof(unsigned long) - 1) / (8 * sizeof(unsigned long))];
+        memset(abs_bits, 0, sizeof(abs_bits));
+        if (ioctl(source_fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) >= 0) {
+            for (int code = 0; code < ABS_CNT; code++) {
+                size_t word = (size_t)code / (8 * sizeof(unsigned long));
+                unsigned long bit = 1UL << ((size_t)code % (8 * sizeof(unsigned long)));
+                if (!(abs_bits[word] & bit)) {
+                    continue;
+                }
+                struct input_absinfo info;
+                if (ioctl(source_fd, EVIOCGABS(code), &info) == 0) {
+                    abs_present[code] = 1;
+                    abs_neutral[code] = info.value;
+                    abs_last[code] = info.value;
+                }
+            }
         }
     }
 
@@ -517,9 +552,9 @@ int main(int argc, char **argv) {
 
     if (ioctl(source_fd, EVIOCGRAB, 1) < 0) {
         fprintf(stderr, "Failed to grab source %s: %s\n", source_path, strerror(errno));
-        if (uinput_fd >= 0) {
-            ioctl(uinput_fd, UI_DEV_DESTROY);
-            close(uinput_fd);
+        if (touch_fd >= 0) {
+            ioctl(touch_fd, UI_DEV_DESTROY);
+            close(touch_fd);
         }
         close(target_fd);
         close(source_fd);
@@ -637,13 +672,20 @@ int main(int argc, char **argv) {
                     fprintf(stderr, "Virtual mouse: could not create uinput device; staying in gamepad mode\n");
                 } else {
                     mouse_mode = 1;
-                    emit_event(target_fd, EV_KEY, BTN_SELECT, 0);
-                    emit_event(target_fd, EV_KEY, BTN_START, 0);
-                    emit_event(target_fd, EV_KEY, BTN_THUMBR, 0);
-                    if (left_x.present) emit_event(target_fd, EV_ABS, left_x.code, left_x.center);
-                    if (left_y.present) emit_event(target_fd, EV_ABS, left_y.code, left_y.center);
-                    if (right_x.present) emit_event(target_fd, EV_ABS, right_x.code, right_x.center);
-                    if (right_y.present) emit_event(target_fd, EV_ABS, right_y.code, right_y.center);
+                    // Release everything the target believes held: every key we forwarded as down
+                    // and every axis away from its rest value (sticks AND triggers/dpad hats).
+                    for (int code = 0; code < KEY_CNT; code++) {
+                        if (key_down[code]) {
+                            emit_event(target_fd, EV_KEY, (unsigned short)code, 0);
+                            key_down[code] = 0;
+                        }
+                    }
+                    for (int code = 0; code < ABS_CNT; code++) {
+                        if (abs_present[code] && abs_last[code] != abs_neutral[code]) {
+                            emit_event(target_fd, EV_ABS, (unsigned short)code, abs_neutral[code]);
+                            abs_last[code] = abs_neutral[code];
+                        }
+                    }
                     emit_event(target_fd, EV_SYN, SYN_REPORT, 0);
                     residual_x = residual_y = wheel_accum = 0.0;
                     left_click_down = right_click_down = 0;
@@ -717,8 +759,11 @@ int main(int argc, char **argv) {
             }
 
             // Arm the mouse-toggle hold when Select+R3 first go down together; disarm on release.
+            // Only a combo key's own press may (re)arm the timer — any other button pressed while
+            // both are held must not reset an in-progress hold.
             if (virtual_mouse) {
-                if (event.value == 1 && select_pressed && thumbr_pressed) {
+                int is_mouse_combo_key = is_select_button(event.code) || event.code == BTN_THUMBR;
+                if (is_mouse_combo_key && event.value == 1 && select_pressed && thumbr_pressed) {
                     mouse_combo_pressed_at_ms = now_ms();
                     mouse_combo_triggered = 0;
                 }
@@ -794,6 +839,13 @@ int main(int argc, char **argv) {
 
         if (swap_nintendo_layout && event.type == EV_KEY) {
             event.code = swap_nintendo_face_button(event.code);
+        }
+
+        // Track forwarded state (post-swap: what the TARGET believes) for mouse-mode entry.
+        if (event.type == EV_KEY && event.code < KEY_CNT) {
+            key_down[event.code] = event.value != 0;
+        } else if (event.type == EV_ABS && event.code < ABS_CNT) {
+            abs_last[event.code] = event.value;
         }
 
         if (write_full(target_fd, &event, sizeof(event)) != 0) {

@@ -1,17 +1,17 @@
 package com.odininputmirror.data
 
-import android.content.Context
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 import java.io.File
 
 internal class RootMirrorProcessRepository(
-    context: Context,
     private val mirrorSettingsRepository: MirrorSettingsRepository,
+    private val files: InputMirrorFiles,
     private val shell: MirrorShell = UnavailableShell,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val procRoot: File = File("/proc"),
 ) : MirrorProcessRepository {
-    private val files = InputMirrorFiles(context.applicationContext)
 
     override fun start(request: MirrorStartRequest) {
         val binary = files.ensureBinaryInstalled()
@@ -32,17 +32,21 @@ internal class RootMirrorProcessRepository(
         val launch =
             "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$pidFileArg$heartbeatFileArg"
         val command = "pidof input_mirror >/dev/null 2>&1 && exit 0; $launch"
-        shell.launchDaemon(command)
+        if (!shell.launchDaemon(command)) {
+            throw IllegalStateException("PServer could not deliver the mirror launch command")
+        }
     }
 
     override fun stop() {
-        shell.exec(STOP_MIRROR_COMMAND)
+        if (!shell.exec(STOP_MIRROR_COMMAND)) {
+            throw IllegalStateException("PServer could not deliver the mirror stop command")
+        }
     }
 
     override fun isRunning(): Boolean {
         val settings = mirrorSettingsRepository.getSettings()
         val startingGrace = settings.expectedRunning &&
-            System.currentTimeMillis() - settings.startedAt < STARTING_GRACE_MS
+            nowMillis() - settings.startedAt < STARTING_GRACE_MS
         if (isHeartbeatFresh()) {
             return true
         }
@@ -52,7 +56,7 @@ internal class RootMirrorProcessRepository(
 
         val pid = runCatching { files.pidFile.readText().trim().toIntOrNull() }.getOrNull()
             ?: return startingGrace
-        val procDir = File("/proc/$pid")
+        val procDir = File(procRoot, pid.toString())
         if (!procDir.exists()) {
             return startingGrace
         }
@@ -67,12 +71,6 @@ internal class RootMirrorProcessRepository(
         return true
     }
 
-    override fun isRunningVerified(): Boolean {
-        return runCatching {
-            shell.read(IS_MIRROR_RUNNING_COMMAND).contains("RUNNING")
-        }.getOrDefault(false)
-    }
-
     override fun clearProcessFiles() {
         files.clearProcessFiles()
     }
@@ -85,12 +83,12 @@ internal class RootMirrorProcessRepository(
             return false
         }
 
-        return System.currentTimeMillis() - heartbeatFile.lastModified() <= HEARTBEAT_STALE_MS
+        return nowMillis() - heartbeatFile.lastModified() <= HEARTBEAT_STALE_MS
     }
 
     private fun readProcessState(pid: Int): String? {
         return runCatching {
-            val stat = File("/proc/$pid/stat").readText()
+            val stat = File(procRoot, "$pid/stat").readText()
             val stateStart = stat.lastIndexOf(") ") + 2
             stat.substring(stateStart).trim().split(Regex("\\s+")).firstOrNull()
         }.getOrNull()

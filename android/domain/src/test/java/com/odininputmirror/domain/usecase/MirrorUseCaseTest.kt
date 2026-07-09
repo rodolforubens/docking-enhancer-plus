@@ -5,7 +5,6 @@ import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.model.findSavedControllerDevice
 import com.odininputmirror.domain.repository.DockStateRepository
-import com.odininputmirror.domain.repository.InputDeviceRepository
 import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 import org.junit.Assert.assertEquals
@@ -41,6 +40,8 @@ class MirrorUseCaseTest {
                 comboHoldKillApp = true,
                 expectedRunning = true,
                 startedAt = 1234L,
+                startedHomeAsBack = true,
+                startedComboHoldKillApp = true,
             ),
             settings.state,
         )
@@ -75,8 +76,8 @@ class MirrorUseCaseTest {
     }
 
     @Test
-    fun getMirrorStatusUsesFastRunningCheckByDefaultAndReturnsPersistedSettings() {
-        val process = FakeMirrorProcessRepository(running = true, verifiedRunning = false)
+    fun getMirrorStatusReturnsRunningCheckAndPersistedSettings() {
+        val process = FakeMirrorProcessRepository(running = true)
         val settings = FakeMirrorSettingsRepository(
             MirrorSettings(
                 source = "/dev/input/event9",
@@ -85,7 +86,6 @@ class MirrorUseCaseTest {
                 targetGuid = "local-guid",
                 homeAsBack = true,
                 comboHoldKillApp = false,
-                autoRestart = true,
                 expectedRunning = true,
             ),
         )
@@ -100,140 +100,8 @@ class MirrorUseCaseTest {
         assertEquals("local-guid", status.targetGuid)
         assertTrue(status.homeAsBack)
         assertFalse(status.comboHoldKillApp)
-        assertTrue(status.autoRestart)
         assertTrue(status.docked)
         assertEquals(1, process.isRunningCount)
-        assertEquals(0, process.isRunningVerifiedCount)
-    }
-
-    @Test
-    fun getMirrorStatusVerifiedClearsProcessFilesWhenRootCheckSaysStopped() {
-        val process = FakeMirrorProcessRepository(running = true, verifiedRunning = false)
-        val settings = FakeMirrorSettingsRepository(MirrorSettings(expectedRunning = true))
-
-        val status = GetMirrorStatusUseCase(process, settings, FakeDockStateRepository())(verifyWithRoot = true)
-
-        assertFalse(status.running)
-        assertEquals(0, process.isRunningCount)
-        assertEquals(1, process.isRunningVerifiedCount)
-        assertEquals(1, process.clearProcessFilesCount)
-    }
-
-    @Test
-    fun restartStopsSupervisorWhenAutoRestartIsDisabled() {
-        val decision = restartUseCase(
-            settings = MirrorSettings(autoRestart = false, expectedRunning = true),
-        )()
-
-        assertEquals(RestartDecision.StopSupervisor, decision)
-    }
-
-    @Test
-    fun restartIdlesWhenMirrorIsNotExpectedToRun() {
-        val decision = restartUseCase(
-            settings = MirrorSettings(autoRestart = true, expectedRunning = false),
-        )()
-
-        assertEquals(RestartDecision.Idle, decision)
-    }
-
-    @Test
-    fun restartDoesNothingWhenMirrorIsAlreadyRunning() {
-        val process = FakeMirrorProcessRepository(running = true)
-        val decision = restartUseCase(
-            settings = MirrorSettings(autoRestart = true, expectedRunning = true),
-            process = process,
-        )()
-
-        assertEquals(RestartDecision.Running, decision)
-        assertEquals(0, process.clearProcessFilesCount)
-        assertTrue(process.startRequests.isEmpty())
-    }
-
-    @Test
-    fun restartWaitsWhenSavedControllersAreMissing() {
-        val process = FakeMirrorProcessRepository(running = false)
-        val decision = restartUseCase(
-            settings = MirrorSettings(
-                source = "/dev/input/event9",
-                target = "/dev/input/event2",
-                sourceGuid = "missing-source",
-                targetGuid = "local-guid",
-                autoRestart = true,
-                expectedRunning = true,
-            ),
-            process = process,
-            devices = listOf(localController(path = "/dev/input/event2", guid = "local-guid")),
-        )()
-
-        assertEquals(RestartDecision.WaitingForDevice, decision)
-        assertEquals(1, process.clearProcessFilesCount)
-        assertTrue(process.startRequests.isEmpty())
-    }
-
-    @Test
-    fun restartWaitsWhenSavedControllersResolveToSameEventPath() {
-        val sharedDevice = localController(path = "/dev/input/event2", guid = "shared-guid")
-        val process = FakeMirrorProcessRepository(running = false)
-        val decision = restartUseCase(
-            settings = MirrorSettings(
-                source = "/dev/input/event9",
-                target = "/dev/input/event2",
-                sourceGuid = "shared-guid",
-                targetGuid = "shared-guid",
-                autoRestart = true,
-                expectedRunning = true,
-            ),
-            process = process,
-            devices = listOf(sharedDevice),
-        )()
-
-        assertEquals(RestartDecision.WaitingForDevice, decision)
-        assertTrue(process.startRequests.isEmpty())
-    }
-
-    @Test
-    fun restartWaitsWithoutStartingWhenThrottleDisallowsRestart() {
-        val process = FakeMirrorProcessRepository(running = false)
-        val decision = restartUseCase(
-            settings = restartableSettings(),
-            process = process,
-            devices = reconnectedControllers(),
-        )(restartAllowed = false)
-
-        assertEquals(RestartDecision.WaitingForDevice, decision)
-        assertEquals(1, process.clearProcessFilesCount)
-        assertTrue(process.startRequests.isEmpty())
-    }
-
-    @Test
-    fun restartUsesGuidBeforeStaleEventPathAndPersistsResolvedPaths() {
-        val process = FakeMirrorProcessRepository(running = false)
-        val settings = FakeMirrorSettingsRepository(restartableSettings())
-        val useCase = restartUseCase(
-            settingsRepository = settings,
-            process = process,
-            devices = reconnectedControllers(),
-        )
-
-        val decision = useCase()
-
-        assertEquals(RestartDecision.Restarted, decision)
-        assertEquals(
-            mirrorRequest(
-                source = "/dev/input/event11",
-                target = "/dev/input/event4",
-                sourceGuid = "external-guid",
-                targetGuid = "local-guid",
-                homeAsBack = true,
-                comboHoldKillApp = true,
-            ),
-            process.startRequests.single(),
-        )
-        assertEquals("/dev/input/event11", settings.state.source)
-        assertEquals("/dev/input/event4", settings.state.target)
-        assertEquals("external-guid", settings.state.sourceGuid)
-        assertEquals("local-guid", settings.state.targetGuid)
     }
 
     @Test
@@ -285,12 +153,10 @@ class MirrorUseCaseTest {
         SetHomeAsBackEnabledUseCase(settings)(true)
         SetComboHoldKillAppEnabledUseCase(settings)(true)
         SetVirtualMouseEnabledUseCase(settings)(true)
-        SetAutoRestartEnabledUseCase(settings)(true)
 
         assertTrue(settings.state.homeAsBack)
         assertTrue(settings.state.comboHoldKillApp)
         assertTrue(settings.state.virtualMouse)
-        assertTrue(settings.state.autoRestart)
         assertTrue(settings.state.expectedRunning)
         assertEquals("/dev/input/event9", settings.state.source)
         assertEquals("/dev/input/event2", settings.state.target)
@@ -443,6 +309,38 @@ class MirrorUseCaseTest {
     }
 
     @Test
+    fun autoMirrorRestartsWhenOptionFlagsChangedSinceStart() {
+        // Daemon launched with virtualMouse off; the user toggled it on afterwards. Same devices,
+        // still running — but the stale daemon must be restarted with the new flags.
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = reconnectedControllers(),
+            settings = restartableSettings().copy(
+                source = "/dev/input/event11",
+                target = "/dev/input/event4",
+                virtualMouse = true,
+                startedVirtualMouse = false,
+            ),
+            mirrorRunning = true,
+        )
+
+        assertEquals(
+            AutoMirrorDecision.Restart(
+                mirrorRequest(
+                    source = "/dev/input/event11",
+                    target = "/dev/input/event4",
+                    sourceGuid = "external-guid",
+                    targetGuid = "local-guid",
+                    homeAsBack = true,
+                    comboHoldKillApp = true,
+                    virtualMouse = true,
+                )
+            ),
+            decision,
+        )
+    }
+
+    @Test
     fun autoMirrorRestartsWhenExternalControllerChanges() {
         val newExternal = externalController(path = "/dev/input/event12", guid = "new-external")
         val local = localController(path = "/dev/input/event4", guid = "local-guid")
@@ -472,30 +370,6 @@ class MirrorUseCaseTest {
         )
     }
 
-    private fun restartUseCase(
-        settings: MirrorSettings,
-        process: FakeMirrorProcessRepository = FakeMirrorProcessRepository(),
-        devices: List<ControllerDevice> = emptyList(),
-    ): RestartMirrorIfNeededUseCase {
-        return restartUseCase(
-            settingsRepository = FakeMirrorSettingsRepository(settings),
-            process = process,
-            devices = devices,
-        )
-    }
-
-    private fun restartUseCase(
-        settingsRepository: FakeMirrorSettingsRepository,
-        process: FakeMirrorProcessRepository = FakeMirrorProcessRepository(),
-        devices: List<ControllerDevice> = emptyList(),
-    ): RestartMirrorIfNeededUseCase {
-        return RestartMirrorIfNeededUseCase(
-            inputDeviceRepository = FakeInputDeviceRepository(devices),
-            mirrorProcessRepository = process,
-            mirrorSettingsRepository = settingsRepository,
-        )
-    }
-
     private fun restartableSettings() = MirrorSettings(
         source = "/dev/input/event9",
         target = "/dev/input/event2",
@@ -503,8 +377,9 @@ class MirrorUseCaseTest {
         targetGuid = "local-guid",
         homeAsBack = true,
         comboHoldKillApp = true,
-        autoRestart = true,
         expectedRunning = true,
+        startedHomeAsBack = true,
+        startedComboHoldKillApp = true,
     )
 
     private fun reconnectedControllers() = listOf(
@@ -558,13 +433,11 @@ class MirrorUseCaseTest {
 
 private class FakeMirrorProcessRepository(
     private val running: Boolean = false,
-    private val verifiedRunning: Boolean = false,
     private val throwOnStop: Boolean = false,
 ) : MirrorProcessRepository {
     val startRequests = mutableListOf<MirrorStartRequest>()
     var stopCount = 0
     var isRunningCount = 0
-    var isRunningVerifiedCount = 0
     var clearProcessFilesCount = 0
 
     override fun start(request: MirrorStartRequest) {
@@ -581,11 +454,6 @@ private class FakeMirrorProcessRepository(
     override fun isRunning(): Boolean {
         isRunningCount += 1
         return running
-    }
-
-    override fun isRunningVerified(): Boolean {
-        isRunningVerifiedCount += 1
-        return verifiedRunning
     }
 
     override fun clearProcessFiles() {
@@ -609,6 +477,9 @@ private class FakeMirrorSettingsRepository(
             homeAsBack = request.homeAsBack,
             comboHoldKillApp = request.comboHoldKillApp,
             virtualMouse = request.virtualMouse,
+            startedHomeAsBack = request.homeAsBack,
+            startedComboHoldKillApp = request.comboHoldKillApp,
+            startedVirtualMouse = request.virtualMouse,
             expectedRunning = true,
             startedAt = startedAt,
         )
@@ -639,10 +510,6 @@ private class FakeMirrorSettingsRepository(
         state = state.copy(virtualMouse = enabled)
     }
 
-    override fun setAutoRestartEnabled(enabled: Boolean) {
-        state = state.copy(autoRestart = enabled)
-    }
-
     override fun setAutoMirrorEnabled(enabled: Boolean) {
         state = state.copy(autoMirrorEnabled = enabled)
     }
@@ -656,16 +523,4 @@ private class FakeDockStateRepository(
     private val docked: Boolean = false,
 ) : DockStateRepository {
     override fun isDockActive(): Boolean = docked
-}
-
-private class FakeInputDeviceRepository(
-    private val devices: List<ControllerDevice>,
-) : InputDeviceRepository {
-    override fun getConnectedControllers(): List<ControllerDevice> = devices
-
-    override fun findSavedDevice(
-        path: String?,
-        guid: String?,
-        devices: List<ControllerDevice>,
-    ): ControllerDevice? = devices.findSavedControllerDevice(path = path, guid = guid)
 }

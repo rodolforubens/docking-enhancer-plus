@@ -54,7 +54,12 @@ android {
         }
 
         release {
-            signingConfig keystorePropertiesFile.exists() ? signingConfigs.release : signingConfigs.debug
+            // No debug-key fallback: without keystore.properties the release APK is left UNSIGNED
+            // (uninstallable) instead of silently shipping signed with whatever debug keystore this
+            // machine happens to have — which would break update continuity for users.
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
