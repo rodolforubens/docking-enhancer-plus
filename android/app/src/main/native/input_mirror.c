@@ -48,6 +48,9 @@ static const double WHEEL_STEP_PER_FRAME = 0.30;     // scroll clicks accumulate
 #ifndef BTN_THUMBR
 #define BTN_THUMBR 0x13e
 #endif
+#ifndef BTN_TR
+#define BTN_TR 0x137
+#endif
 #ifndef BTN_SELECT
 #define BTN_SELECT 0x13a
 #endif
@@ -367,10 +370,11 @@ static int create_touch_device(void) {
     setup.id.product = 0x0002;
     setup.id.version = 1;
     // A real name is required or Android/the firmware ignores the device (the touch never registers
-    // and the cursor won't hide). Because a named device pops a "connected" toast, this device is
-    // created ONCE at daemon startup and kept for the whole session, so the toast only appears once
-    // (lost among the boot device-connect toasts) instead of on every mouse-mode toggle.
-    snprintf(setup.name, sizeof(setup.name), "Docking Enhancer Touch");
+    // and the cursor won't hide). Because a named device unavoidably pops a "<name> connected" toast,
+    // the name is chosen so that toast reads as an intentional mirror-activation message. The device
+    // is created once per mirror start and kept for the whole session, so the toast shows once on
+    // start (not on every mouse-mode toggle).
+    snprintf(setup.name, sizeof(setup.name), "Docking Enhancer Mirror");
 
     if (ioctl(fd, UI_DEV_SETUP, &setup) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
         close(fd);
@@ -503,11 +507,13 @@ int main(int argc, char **argv) {
             query_axis(source_fd, &right_x, ABS_Z);
             query_axis(source_fd, &right_y, ABS_RZ);
         }
-        // Create the touch-flush helper once now (kept for the whole session) so its "connected"
-        // toast fires a single time at startup rather than on every mouse-mode toggle, and so it is
-        // fully enumerated by the time we need it to hide the cursor.
-        touch_fd = create_touch_device();
     }
+
+    // Create the touch helper on every mirror start, regardless of the virtual-mouse setting: it is
+    // what hides the cursor on mouse-mode exit when enabled, and its unavoidable "connected" toast
+    // ("Docking Enhancer Mirror connected") doubles as a consistent mirror-activation notification on
+    // each start. Created once and kept for the whole session so the toast doesn't repeat per toggle.
+    touch_fd = create_touch_device();
 
     if (ioctl(source_fd, EVIOCGRAB, 1) < 0) {
         fprintf(stderr, "Failed to grab source %s: %s\n", source_path, strerror(errno));
@@ -542,6 +548,7 @@ int main(int argc, char **argv) {
     double wheel_accum = 0.0; // carry sub-click scroll between frames
     int left_click_down = 0;
     int right_click_down = 0;
+    int shade_open = 0; // our view of whether R1 last opened the notification shade
 
     while (keep_running) {
         int timeout_ms = 1000;
@@ -640,6 +647,7 @@ int main(int argc, char **argv) {
                     emit_event(target_fd, EV_SYN, SYN_REPORT, 0);
                     residual_x = residual_y = wheel_accum = 0.0;
                     left_click_down = right_click_down = 0;
+                    shade_open = 0;
                     last_frame_ms = now_ms();
                 }
             } else {
@@ -770,6 +778,16 @@ int main(int argc, char **argv) {
                 right_click_down = event.value ? 1 : 0;
                 emit_event(uinput_fd, EV_KEY, BTN_RIGHT, right_click_down);
                 emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
+            } else if (event.type == EV_KEY && event.code == BTN_TR && event.value == 1) {
+                // R1 toggles Android's notification shade (a mouse can't drag it down). Commands are
+                // idempotent enough that a stale shade_open just costs one extra press.
+                if (shade_open) {
+                    run_detached("cmd statusbar collapse");
+                    shade_open = 0;
+                } else {
+                    run_detached("cmd statusbar expand-notifications");
+                    shade_open = 1;
+                }
             }
             continue;
         }

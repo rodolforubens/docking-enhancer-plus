@@ -30,6 +30,7 @@ It runs a small native daemon that reads the external controller and writes into
 - **No root required** — privileged work goes through the firmware's `PServerBinder` service, so there's no Magisk, no su prompt, nothing to unlock.
 - **Home as Back** — optionally map the external controller's Home button to Android Back.
 - **Select + Start to close** — hold Select and Start for 3 seconds to force-stop the foreground app.
+- **Virtual mouse** — flip the external controller into an on-screen mouse with a button combo, for tapping through Android UI a gamepad can't reach — cursor, scroll, clicks, and a shortcut for the notification shade, all no-root.
 - **Odin layout aware** — swaps the A/B and X/Y face buttons when targeting the Odin's Nintendo-style profile.
 - **Fully gamepad-navigable UI** — a Compose + Material 3 interface you can drive entirely from the controller.
 - **Resilient by design** — a foreground supervisor service auto-starts, restarts on disconnect, and survives reboots; liveness is tracked with a heartbeat, not a fragile process-name check.
@@ -73,6 +74,7 @@ To stop for good, open the app and tap **Turn Off Automatic Mirror**.
 - **Local / External controller cards** — show what's detected. The internal controller is auto-detected on recognized handhelds and locked while mirroring; if it guesses wrong, tap the local card to pick it by hand.
 - **Home as Back** — the external controller's Home button acts as Android Back.
 - **Select + Start closes app** — hold both for 3 seconds to force-stop the current foreground app, handy for bailing out of a game from the couch.
+- **Virtual mouse** — hold **Select + right-stick click (R3)** to switch the external controller into a mouse, and the same combo to switch back. The left stick moves the pointer, the right stick scrolls, **A** left-clicks, **B** right-clicks, and **R1** opens or closes the notification shade. It's built for navigating Android menus from the couch when no touchscreen is in reach; internally it creates its own no-root `uinput` pointer while mouse mode is on.
 
 > [!TIP]
 > The whole UI is gamepad-navigable — you can set everything up from the external controller without touching the screen.
@@ -82,7 +84,8 @@ To stop for good, open the app and tap **Turn Off Automatic Mirror**.
 - Event node paths (`/dev/input/eventX`) are unstable across reconnects and reboots; the app resolves controllers by GUID first, then path.
 - Controller GUIDs are derived from vendor + product only, so two identical controllers of the same model share a GUID and can't be told apart — an uncommon case on a handheld (typically one built-in plus one external of a different model).
 - "Home as Back" injects an Android Back key event at the framework level. Apps that read controllers directly via evdev (e.g. some emulators) may not react to it.
-- Writing directly to an internal controller's evdev node depends on the device exposing it that way; mirroring targets the built-in controller rather than creating a virtual `uinput` device.
+- Writing directly to an internal controller's evdev node depends on the device exposing it that way; the core mirror targets the built-in controller rather than creating a virtual `uinput` device. (The optional virtual mouse is the exception — it creates its own `uinput` pointer while active.)
+- The virtual mouse can't drag the notification shade open the way a finger swipe does, so **R1** opens/closes it via a system command instead. The app tracks that open/closed state itself, so closing the shade another way (Back, tapping outside) may cost one extra R1 press to resync.
 
 ## Getting started
 
