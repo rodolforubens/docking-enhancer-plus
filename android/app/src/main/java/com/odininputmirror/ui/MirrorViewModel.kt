@@ -34,6 +34,7 @@ data class MirrorUiState(
     val docked: Boolean = false,
     val manualInternalGuid: String? = null,
     val unsupported: Boolean = false,
+    val virtualMouse: Boolean = false,
 ) {
     // On a recognised handheld (e.g. Odin) the native layer flags the internal controller by
     // hardware signature and locks it. Otherwise the internal defaults to the first detected
@@ -124,6 +125,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 enabled = status.running,
                 homeAsBack = status.homeAsBack,
                 comboHoldKillApp = status.comboHoldKillApp,
+                virtualMouse = status.virtualMouse,
                 autoMirrorEnabled = status.autoMirrorEnabled,
                 restartWaiting = status.expectedRunning && !status.running,
                 docked = status.docked,
@@ -200,6 +202,19 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 _state.update { it.copy(message = error.message ?: error.toString()) }
             } finally {
                 _state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    fun toggleVirtualMouse(nextValue: Boolean) {
+        val current = _state.value
+        if (current.autoMirrorEnabled || current.busy) return
+        _state.update { it.copy(virtualMouse = nextValue) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { graph.setVirtualMouseEnabled(nextValue) }
+            } catch (error: Exception) {
+                _state.update { it.copy(virtualMouse = !nextValue, message = error.message ?: error.toString()) }
             }
         }
     }

@@ -9,6 +9,7 @@ data class MirrorStatus(
     val targetGuid: String?,
     val homeAsBack: Boolean,
     val comboHoldKillApp: Boolean,
+    val virtualMouse: Boolean,
     val autoRestart: Boolean,
     val autoMirrorEnabled: Boolean,
     val docked: Boolean,

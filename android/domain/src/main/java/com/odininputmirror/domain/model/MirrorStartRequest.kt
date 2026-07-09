@@ -7,4 +7,5 @@ data class MirrorStartRequest(
     val comboHoldKillApp: Boolean,
     val sourceGuid: String? = null,
     val targetGuid: String? = null,
+    val virtualMouse: Boolean = false,
 )

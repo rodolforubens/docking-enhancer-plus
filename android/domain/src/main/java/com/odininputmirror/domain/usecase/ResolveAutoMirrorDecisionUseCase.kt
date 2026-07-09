@@ -32,6 +32,7 @@ class ResolveAutoMirrorDecisionUseCase {
             targetGuid = local.guid,
             homeAsBack = settings.homeAsBack,
             comboHoldKillApp = settings.comboHoldKillApp,
+            virtualMouse = settings.virtualMouse,
         )
 
         val sameMirror = settings.sourceGuid == external.guid &&

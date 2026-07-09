@@ -30,6 +30,7 @@ class GetMirrorStatusUseCase(
             targetGuid = settings.targetGuid,
             homeAsBack = settings.homeAsBack,
             comboHoldKillApp = settings.comboHoldKillApp,
+            virtualMouse = settings.virtualMouse,
             autoRestart = settings.autoRestart,
             autoMirrorEnabled = settings.autoMirrorEnabled,
             docked = dockStateRepository.isDockActive(),

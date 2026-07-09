@@ -14,6 +14,12 @@ class SetComboHoldKillAppEnabledUseCase(
     operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setComboHoldKillAppEnabled(enabled)
 }
 
+class SetVirtualMouseEnabledUseCase(
+    private val mirrorSettingsRepository: MirrorSettingsRepository,
+) {
+    operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setVirtualMouseEnabled(enabled)
+}
+
 class SetAutoRestartEnabledUseCase(
     private val mirrorSettingsRepository: MirrorSettingsRepository,
 ) {

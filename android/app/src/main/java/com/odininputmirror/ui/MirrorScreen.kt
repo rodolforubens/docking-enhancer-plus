@@ -205,6 +205,15 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                 onCheckedChange = { viewModel.toggleComboHoldKillApp(it) },
             )
 
+            Spacer(Modifier.height(12.dp))
+            SettingRow(
+                title = "Virtual mouse (Select+R3)",
+                description = "Hold Select and click the right stick to toggle a mouse: left stick moves the cursor, right stick scrolls, A/B click",
+                checked = state.virtualMouse,
+                enabled = !(state.autoMirrorEnabled || state.busy),
+                onCheckedChange = { viewModel.toggleVirtualMouse(it) },
+            )
+
             Spacer(Modifier.height(16.dp))
             Text(
                 if (state.loading) "Scanning controllers..."

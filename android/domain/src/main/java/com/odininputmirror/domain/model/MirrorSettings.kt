@@ -7,6 +7,7 @@ data class MirrorSettings(
     val targetGuid: String? = null,
     val homeAsBack: Boolean = false,
     val comboHoldKillApp: Boolean = false,
+    val virtualMouse: Boolean = false,
     val autoRestart: Boolean = false,
     val autoMirrorEnabled: Boolean = true,
     val expectedRunning: Boolean = false,

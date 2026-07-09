@@ -284,14 +284,64 @@ class MirrorUseCaseTest {
 
         SetHomeAsBackEnabledUseCase(settings)(true)
         SetComboHoldKillAppEnabledUseCase(settings)(true)
+        SetVirtualMouseEnabledUseCase(settings)(true)
         SetAutoRestartEnabledUseCase(settings)(true)
 
         assertTrue(settings.state.homeAsBack)
         assertTrue(settings.state.comboHoldKillApp)
+        assertTrue(settings.state.virtualMouse)
         assertTrue(settings.state.autoRestart)
         assertTrue(settings.state.expectedRunning)
         assertEquals("/dev/input/event9", settings.state.source)
         assertEquals("/dev/input/event2", settings.state.target)
+    }
+
+    @Test
+    fun startMirrorPropagatesVirtualMouseFlagAndPersistsIt() {
+        val process = FakeMirrorProcessRepository()
+        val settings = FakeMirrorSettingsRepository()
+        val request = mirrorRequest(virtualMouse = true)
+
+        StartMirrorUseCase(process, settings, nowMillis = { 1L })(request)
+
+        assertTrue(process.startRequests.single().virtualMouse)
+        assertTrue(settings.state.virtualMouse)
+    }
+
+    @Test
+    fun getMirrorStatusReflectsVirtualMouseSetting() {
+        val process = FakeMirrorProcessRepository(running = true)
+        val settings = FakeMirrorSettingsRepository(MirrorSettings(virtualMouse = true))
+
+        val status = GetMirrorStatusUseCase(process, settings, FakeDockStateRepository())()
+
+        assertTrue(status.virtualMouse)
+    }
+
+    @Test
+    fun autoMirrorPropagatesVirtualMouseFlagIntoStartRequest() {
+        val firstExternal = externalController(path = "/dev/input/event9", guid = "first-external")
+        val local = localController(path = "/dev/input/event2", guid = "odin-internal")
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, firstExternal),
+            settings = MirrorSettings(virtualMouse = true),
+            mirrorRunning = false,
+        )
+
+        assertEquals(
+            AutoMirrorDecision.Start(
+                mirrorRequest(
+                    source = "/dev/input/event9",
+                    target = "/dev/input/event2",
+                    sourceGuid = "first-external",
+                    targetGuid = "odin-internal",
+                    virtualMouse = true,
+                )
+            ),
+            decision,
+        )
     }
 
     @Test
@@ -469,6 +519,7 @@ class MirrorUseCaseTest {
         targetGuid: String? = "local-guid",
         homeAsBack: Boolean = false,
         comboHoldKillApp: Boolean = false,
+        virtualMouse: Boolean = false,
     ) = MirrorStartRequest(
         source = source,
         target = target,
@@ -476,6 +527,7 @@ class MirrorUseCaseTest {
         targetGuid = targetGuid,
         homeAsBack = homeAsBack,
         comboHoldKillApp = comboHoldKillApp,
+        virtualMouse = virtualMouse,
     )
 
     private fun externalController(
@@ -556,6 +608,7 @@ private class FakeMirrorSettingsRepository(
             targetGuid = request.targetGuid,
             homeAsBack = request.homeAsBack,
             comboHoldKillApp = request.comboHoldKillApp,
+            virtualMouse = request.virtualMouse,
             expectedRunning = true,
             startedAt = startedAt,
         )
@@ -580,6 +633,10 @@ private class FakeMirrorSettingsRepository(
 
     override fun setComboHoldKillAppEnabled(enabled: Boolean) {
         state = state.copy(comboHoldKillApp = enabled)
+    }
+
+    override fun setVirtualMouseEnabled(enabled: Boolean) {
+        state = state.copy(virtualMouse = enabled)
     }
 
     override fun setAutoRestartEnabled(enabled: Boolean) {

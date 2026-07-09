@@ -16,6 +16,7 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             targetGuid = prefs.getString(KEY_TARGET_GUID, null),
             homeAsBack = prefs.getBoolean(KEY_HOME_AS_BACK, false),
             comboHoldKillApp = prefs.getBoolean(KEY_COMBO_HOLD_KILL_APP, false),
+            virtualMouse = prefs.getBoolean(KEY_VIRTUAL_MOUSE, false),
             autoRestart = prefs.getBoolean(KEY_AUTO_RESTART, false),
             autoMirrorEnabled = prefs.getBoolean(KEY_AUTO_MIRROR_ENABLED, true),
             expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false),
@@ -32,6 +33,7 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             .putString(KEY_TARGET_GUID, request.targetGuid)
             .putBoolean(KEY_HOME_AS_BACK, request.homeAsBack)
             .putBoolean(KEY_COMBO_HOLD_KILL_APP, request.comboHoldKillApp)
+            .putBoolean(KEY_VIRTUAL_MOUSE, request.virtualMouse)
             .putBoolean(KEY_EXPECTED_RUNNING, true)
             .putLong(KEY_STARTED_AT, startedAt)
             .apply()
@@ -56,6 +58,10 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
 
     override fun setComboHoldKillAppEnabled(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_COMBO_HOLD_KILL_APP, enabled).apply()
+    }
+
+    override fun setVirtualMouseEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_VIRTUAL_MOUSE, enabled).apply()
     }
 
     override fun setAutoRestartEnabled(enabled: Boolean) {

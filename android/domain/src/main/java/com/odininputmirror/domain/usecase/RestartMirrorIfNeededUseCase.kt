@@ -42,6 +42,7 @@ class RestartMirrorIfNeededUseCase(
                 comboHoldKillApp = settings.comboHoldKillApp,
                 sourceGuid = source.guid,
                 targetGuid = target.guid,
+                virtualMouse = settings.virtualMouse,
             )
         )
         mirrorSettingsRepository.saveRestarted(source.path, target.path, source.guid, target.guid)
