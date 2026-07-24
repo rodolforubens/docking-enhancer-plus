@@ -3,6 +3,7 @@ package com.odininputmirror.data
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -21,24 +22,40 @@ import kotlin.concurrent.withLock
  * exit. A plain background child survives the transact return.
  */
 internal class PServerShell(
-    context: Context,
-    private val pserver: PServerExec = PServerExec(),
+    private val filesDir: File,
+    private val pserver: PServerTransactor,
 ) : MirrorShell {
-    private val appContext = context.applicationContext
+    constructor(context: Context, pserver: PServerTransactor = PServerExec()) : this(
+        filesDir = context.applicationContext.filesDir,
+        pserver = pserver,
+    )
 
     override val isAvailable: Boolean get() = pserver.isAvailable
 
     override fun exec(command: String): Boolean = transact(command)
 
     override fun read(command: String): String {
-        val out = File(appContext.filesDir, STAGE_FILE)
+        // A UNIQUE staging file per call. read() runs concurrently with the supervisor's own poll
+        // reads; a single shared file would let one call's output clobber another's in the window
+        // between the (locked) transact and the (unlocked) readText, and would return stale content
+        // from a prior call whenever a transact fails (the command never truncates the file). A
+        // fresh name isolates each caller: on failure or empty output the file simply isn't there,
+        // which reads back as "".
+        val out = File(filesDir, "pserver_read_${readSeq.incrementAndGet()}.out")
         val outQ = out.absolutePath.shellQuote()
-        // Redirect the real output to a file (dodging the first-line-only reply) and make it
-        // app-readable. The command runs in a subshell so the redirect captures ALL of its output,
-        // not just its last simple command. No exit code is available; an empty file means the
-        // command produced nothing. 644: the app only ever READS this root-owned file back.
-        transact("($command) > $outQ 2>/dev/null; chmod 644 $outQ")
-        return runCatching { out.readText() }.getOrDefault("")
+        return try {
+            // Redirect the real output to a file (dodging the first-line-only reply) and make it
+            // app-readable. The command runs in a subshell so the redirect captures ALL of its
+            // output, not just its last simple command. No exit code is available; an empty file
+            // means the command produced nothing. 644: the app only ever READS this file back.
+            if (!transact("($command) > $outQ 2>/dev/null; chmod 644 $outQ")) {
+                ""
+            } else {
+                runCatching { out.readText() }.getOrDefault("")
+            }
+        } finally {
+            out.delete()
+        }
     }
 
     override fun launchDaemon(command: String): Boolean {
@@ -50,8 +67,8 @@ internal class PServerShell(
         // truncate/rewrite the SAME inode a still-starting `sh` from a previous launch may be
         // mid-reading (sh reads its script incrementally) — the rename gives the new launch a fresh
         // inode while any old reader keeps its own.
-        val launcher = File(appContext.filesDir, DAEMON_SCRIPT)
-        val staging = File(appContext.filesDir, "$DAEMON_SCRIPT.tmp")
+        val launcher = File(filesDir, DAEMON_SCRIPT)
+        val staging = File(filesDir, "$DAEMON_SCRIPT.tmp")
         staging.writeText("$command >/dev/null 2>&1\n")
         staging.setReadable(true, false)
         staging.setExecutable(true, false)
@@ -75,9 +92,10 @@ internal class PServerShell(
 
     private companion object {
         const val TAG = "PServerShell"
-        const val STAGE_FILE = "pserver_read.out"
         const val DAEMON_SCRIPT = "pserver_daemon.sh"
         // PServerBinder cannot handle concurrent transacts; serialize all callers process-wide.
         val lock = ReentrantLock()
+        // Monotonic suffix for per-call read staging files (unique within the process).
+        val readSeq = AtomicLong(0)
     }
 }

@@ -7,6 +7,18 @@ import android.os.Parcel
 import java.nio.charset.Charset
 
 /**
+ * Runs a privileged command as root and returns its (first-line) stdout, or a failure. The seam
+ * that lets [PServerShell] be unit-tested without a live binder; the production impl is [PServerExec].
+ */
+internal interface PServerTransactor {
+    /** True when the backend can actually run privileged commands on this device. */
+    val isAvailable: Boolean
+
+    /** Runs [command] as root; returns its stdout reply, or a failure if the transact didn't land. */
+    fun executeAsRoot(command: String): Result<String?>
+}
+
+/**
  * No-root privileged command execution via the stock firmware's `PServerBinder` service.
  *
  * This is the same "ClusterTune" technique PULSE uses: the handheld's own firmware ships a
@@ -24,7 +36,7 @@ import java.nio.charset.Charset
  * into the real mirror start path until the probe confirms both on-device.
  */
 @SuppressLint("DiscouragedPrivateApi", "PrivateApi")
-internal class PServerExec {
+internal class PServerExec : PServerTransactor {
 
     // The binder is cached but NOT immortal: if the firmware service restarts, the old IBinder goes
     // dead and every transact would fail forever. [binder] re-resolves a dead/missing handle so the
@@ -32,7 +44,7 @@ internal class PServerExec {
     @Volatile
     private var cachedBinder: IBinder? = null
 
-    val isAvailable: Boolean get() = binder() != null
+    override val isAvailable: Boolean get() = binder() != null
 
     private fun binder(): IBinder? {
         val current = cachedBinder
@@ -49,7 +61,7 @@ internal class PServerExec {
     }.getOrNull()
 
     /** Runs [command] through PServer as root and returns its stdout, or a failure. */
-    fun executeAsRoot(command: String): Result<String?> {
+    override fun executeAsRoot(command: String): Result<String?> {
         val target = binder() ?: return Result.failure(IllegalStateException("$SERVICE_NAME not available"))
 
         val data = Parcel.obtain()
