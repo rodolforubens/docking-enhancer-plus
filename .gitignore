@@ -1,22 +1,32 @@
-# Dependencies
-node_modules/
+# ==============================================================================
+# SECRETS — never commit. Matched by PATTERN, not by path: a keystore that gets
+# renamed or moved must stay ignored, because in a public repo one slip publishes
+# the signing identity and there is no taking it back.
+# ==============================================================================
+*.jks
+*.keystore
+keystore.properties
+*.p12
+*.pfx
+*.pem
+*.key
+google-services.json
+.env
+.env.*
+!.env.example
 
-# React Native / Metro
-.metro/
-.bundle/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Machine-specific SDK/NDK paths. Also leaks the developer's username.
+local.properties
 
-# Android local configuration
-android/local.properties
-android/.gradle/
-android/build/
-android/app/build/
-android/keystore.properties
-android/app/release.keystore
-
-# Android generated packages and reports
+# ==============================================================================
+# Build output
+# ==============================================================================
+build/
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
 *.apk
 *.ap_
 *.aab
@@ -25,31 +35,31 @@ android/app/release.keystore
 android/app/release/
 android/app/debug/
 
-# Gradle
-.gradle/
-build/
+# Node is only ever pulled in by tooling (npx), never by the app itself.
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Native build outputs
-.cxx/
-android/app/.cxx/
-
-# IDE / OS files
+# ==============================================================================
+# IDE / OS
+# ==============================================================================
 .idea/
-.vscode/
 *.iml
 .DS_Store
 Thumbs.db
+# Ignored on purpose: c_cpp_properties.json hardcodes an absolute NDK path and
+# the developer's home directory, so it is neither portable nor publishable.
+.vscode/
 
-# Environment files
-.env
-.env.*
-!.env.example
-
-# Local agent skills/config. Personal settings stay out, and so do the third-party skills
-# themselves — `skills-lock.json` is tracked instead, so a collaborator reproduces the same tooling
-# with `npx skills` rather than us vendoring (and re-licensing) someone else's work. The project's
-# own e2e suite IS tracked: it is test code for this product, not reinstallable tooling. Written as
-# .claude/* (not .claude/) since git cannot re-include anything under an excluded directory.
+# ==============================================================================
+# Agent tooling. Personal settings stay out, and so do the third-party skills
+# themselves — `skills-lock.json` is tracked instead, so a collaborator reproduces
+# the same tooling with `npx skills` rather than us vendoring (and re-licensing)
+# someone else's work. The project's own e2e suite IS tracked: it is test code for
+# this product, not reinstallable tooling. Written as .claude/* (not .claude/)
+# because git cannot re-include anything under an excluded directory.
+# ==============================================================================
 .agents/
 .claude/*
 !.claude/skills/
@@ -57,13 +67,18 @@ Thumbs.db
 !.claude/skills/mirror-e2e/
 .claude/skills/mirror-e2e/build/
 
+# ==============================================================================
 # Temporary files
+# ==============================================================================
 tmp/
 temp/
 *.tmp
 *.log
 
-# Keep source and required app assets tracked.
+# ==============================================================================
+# The prebuilt mirror daemon is a deliberate exception: it is a build output, but
+# it ships as an app asset so users need not install an NDK to run the project.
+# ==============================================================================
 !android/app/src/main/assets/
 !android/app/src/main/assets/input_mirror/
 !android/app/src/main/assets/input_mirror/input_mirror
