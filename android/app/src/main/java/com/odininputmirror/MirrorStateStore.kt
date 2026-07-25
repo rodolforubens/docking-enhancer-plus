@@ -26,4 +26,30 @@ object MirrorStateStore {
     fun publish(devices: List<ControllerDevice>, status: MirrorStatus) {
         _snapshot.value = Snapshot(devices, status)
     }
+
+    // Whether the UI is currently on-screen. The supervisor skips its one privileged PServer call
+    // per tick (the controller enumeration) when undocked AND the UI is hidden, since nobody reads
+    // the device list then and the undocked auto-mirror decision ignores it — so a pocketed handheld
+    // stops spawning a pserver subprocess every idle tick.
+    @Volatile
+    var uiVisible: Boolean = false
+        private set
+
+    private val tickMonitor = Object()
+
+    /** Called from the Activity lifecycle. A hidden→visible flip wakes the supervisor so the device
+     * list refreshes immediately instead of waiting out the current idle interval. */
+    fun setUiVisible(visible: Boolean) {
+        val wasVisible = uiVisible
+        uiVisible = visible
+        if (visible && !wasVisible) {
+            synchronized(tickMonitor) { tickMonitor.notifyAll() }
+        }
+    }
+
+    /** The supervisor sleeps here between ticks so [setUiVisible] can cut the wait short. Spurious
+     * wakeups only cost one early tick, which is harmless. Propagates interrupts for clean shutdown. */
+    fun awaitNextTick(maxSleepMs: Long) {
+        synchronized(tickMonitor) { tickMonitor.wait(maxSleepMs) }
+    }
 }

@@ -125,6 +125,20 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) onWindowFocused?.invoke()
     }
 
+    // Tell the supervisor whether the device list is being watched. Visible (started) → it keeps
+    // enumerating controllers so the UI stays live; hidden (stopped) → undocked, it can skip that
+    // privileged PServer call. onStart/onStop (not onResume/onPause) so a transient dialog or the
+    // recents overlay doesn't blank the list.
+    override fun onStart() {
+        super.onStart()
+        MirrorStateStore.setUiVisible(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        MirrorStateStore.setUiVisible(false)
+    }
+
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(scrollRunnable)

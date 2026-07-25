@@ -65,10 +65,16 @@ class InputMirrorSupervisorService : Service() {
                 val now = System.currentTimeMillis()
                 val settings = graph.settingsRepository.getSettings()
                 val dockActive = graph.dockStateRepository.isDockActive()
-                // Read the controllers every tick regardless of dock state and publish them for the
-                // UI to observe — the screen shows connected controllers even undocked (for setup),
-                // while the auto-mirror decision below still uses the dock-gated list.
-                val allDevices = graph.inputDeviceRepository.getConnectedControllers()
+                // Enumerate controllers only when the result is actually consumed: docked (the
+                // auto-mirror decision below reads the list) or the UI is on-screen (it renders the
+                // list for setup). Undocked with the UI hidden, this is the one privileged PServer
+                // call per tick that nobody reads — skip it so a pocketed handheld isn't spawning a
+                // subprocess every idle tick. The undocked decision uses an empty list regardless.
+                val allDevices = if (dockActive || MirrorStateStore.uiVisible) {
+                    graph.inputDeviceRepository.getConnectedControllers()
+                } else {
+                    emptyList()
+                }
                 val mirrorRunning = graph.processRepository.isRunning()
                 // While nothing is running, heal any node a crashed daemon left hidden so a stuck,
                 // invisible external controller can recover on its own (no-op unless there's a
@@ -84,7 +90,7 @@ class InputMirrorSupervisorService : Service() {
                     }
                     updateSupervisorState(SupervisorState.Disabled)
                     sleepMs = SUPERVISOR_IDLE_INTERVAL_MS
-                    Thread.sleep(sleepMs)
+                    MirrorStateStore.awaitNextTick(sleepMs)
                     continue
                 }
                 val devices = if (dockActive) allDevices else emptyList()
@@ -156,7 +162,7 @@ class InputMirrorSupervisorService : Service() {
             }
 
             try {
-                Thread.sleep(sleepMs)
+                MirrorStateStore.awaitNextTick(sleepMs)
             } catch (_: InterruptedException) {
                 break
             }
