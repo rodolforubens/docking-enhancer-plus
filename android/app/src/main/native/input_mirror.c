@@ -36,6 +36,12 @@ static const long long MOUSE_FRAME_INTERVAL_MS = 12; // ~83 Hz cursor/scroll upd
 static const double MOUSE_SPEED = 18.0;              // max cursor pixels per frame at full deflection
 static const double MOUSE_DEADZONE = 0.18;           // fraction of stick travel ignored around center
 static const double WHEEL_STEP_PER_FRAME = 0.30;     // scroll clicks accumulated per frame at full deflection
+// Android only paints the pointer once it receives real motion, so entering mouse mode used to leave
+// the cursor invisible until the stick was moved. We can't just emit one nudge on entry either: the
+// uinput device was created microseconds ago and the framework still has to notice it via inotify
+// and open it, so anything written before that is dropped. Instead nudge on every idle frame for
+// this long, which covers the open latency and stops as soon as the window closes.
+static const long long CURSOR_SHOW_NUDGE_MS = 300;
 
 /*
  * In Odin mode we remap the four face buttons of a mirrored external controller to the
@@ -612,6 +618,7 @@ struct mirror_state {
     int mouse_combo_triggered;
     long long mouse_combo_pressed_at_ms;
     long long last_frame_ms;
+    long long cursor_nudge_until_ms; // keep jiggling the pointer until this instant so it shows up
     double residual_x;  // carry sub-pixel cursor motion between frames
     double residual_y;
     double wheel_accum; // carry sub-click scroll between frames
@@ -703,6 +710,14 @@ static void emit_mouse_frame(struct mirror_state *s) {
         if (dy != 0) emit_event(s->uinput_fd, EV_REL, REL_Y, dy);
         if (wheel != 0) emit_event(s->uinput_fd, EV_REL, REL_WHEEL, wheel);
         emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+    } else if (tick < s->cursor_nudge_until_ms) {
+        // Idle inside the reveal window: step one pixel out and straight back, as two separate
+        // reports. Each is real motion so the framework paints (and keeps) the pointer, while the
+        // pair nets to zero, leaving the cursor exactly where the user last had it.
+        emit_event(s->uinput_fd, EV_REL, REL_X, 1);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+        emit_event(s->uinput_fd, EV_REL, REL_X, -1);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
     }
 }
 
@@ -733,6 +748,7 @@ static void enter_mouse_mode(struct mirror_state *s) {
     s->left_click_down = s->right_click_down = 0;
     s->shade_open = 0;
     s->last_frame_ms = now_ms();
+    s->cursor_nudge_until_ms = s->last_frame_ms + CURSOR_SHOW_NUDGE_MS;
 }
 
 // Leave mouse mode: release held clicks, destroy the pointer (so Android drops the on-screen cursor)
