@@ -19,6 +19,10 @@
 static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
 static const long long HEARTBEAT_INTERVAL_MS = 1000;
+// Transient write errors to the target (the internal controller, which almost never truly
+// disappears) are retried this many times before giving up — so a momentary hiccup doesn't tear
+// down the whole mirror.
+static const int TARGET_WRITE_RETRIES = 3;
 
 // Virtual mouse mode (opt-in via --virtual-mouse). Select+R3 held this long toggles the mode; while
 // on, the grabbed controller drives a self-created uinput pointer instead of the target node.
@@ -134,6 +138,22 @@ static int emit_event(int fd, unsigned short type, unsigned short code, int valu
     event.code = code;
     event.value = value;
     return write_full(fd, &event, sizeof(event));
+}
+
+// Write one forwarded event to the target, tolerating a transient failure. write_full already
+// retries EINTR; here we retry the whole write a few times with a short backoff so a momentary
+// target error (the internal controller briefly busy) doesn't break the mirror loop. Gives up —
+// returning -1 — only if it keeps failing, at which point the target is likely genuinely gone.
+static int write_event_tolerant(int fd, const struct input_event *event) {
+    for (int attempt = 0; ; attempt++) {
+        if (write_full(fd, event, sizeof(*event)) == 0) {
+            return 0;
+        }
+        if (attempt >= TARGET_WRITE_RETRIES) {
+            return -1;
+        }
+        usleep(2000);
+    }
 }
 
 static int is_home_button(unsigned short code) {
@@ -436,11 +456,26 @@ struct hidden_node {
 static void hide_node(const char *path, struct hidden_node *slot) {
     memset(slot, 0, sizeof(*slot));
     snprintf(slot->path, sizeof(slot->path), "%s", path);
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISCHR(st.st_mode)) {
-        fprintf(stderr, "hide: %s not a present char node, skipping\n", path);
+
+    // Verify identity before unlinking. Event numbers renumber across reconnects, so between the app
+    // resolving this path and us acting on it the node could point to a DIFFERENT device. We only
+    // ever hide the Odin quirk node (vendor 0x2020); open it, confirm that, and capture the device
+    // number from the SAME fd — refuse to unlink anything else.
+    int probe = open(path, O_RDONLY | O_CLOEXEC);
+    if (probe < 0) {
+        fprintf(stderr, "hide: cannot open %s to verify: %s\n", path, strerror(errno));
         return;
     }
+    struct stat st;
+    struct input_id id;
+    if (fstat(probe, &st) != 0 || !S_ISCHR(st.st_mode) ||
+        ioctl(probe, EVIOCGID, &id) != 0 || id.vendor != ODIN_VENDOR_ID) {
+        fprintf(stderr, "hide: %s failed identity check (not an Odin 0x2020 node), refusing\n", path);
+        close(probe);
+        return;
+    }
+    close(probe);
+
     slot->rdev = st.st_rdev;
     if (unlink(path) == 0) {
         slot->active = 1;
@@ -491,9 +526,79 @@ static void restore_hidden_nodes(struct hidden_node *nodes, int count) {
     }
 }
 
+// Persist which nodes we have hidden (path + device number, one per line) so a crashed or KILL'd
+// session — which never runs restore_hidden_nodes — can be healed later. Rewritten each time the
+// hidden set changes; cleared on clean exit.
+static void write_hidden_state(const char *path, const struct hidden_node *nodes, int count) {
+    if (path == NULL) {
+        return;
+    }
+    FILE *f = fopen(path, "w");
+    if (f == NULL) {
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].active) {
+            fprintf(f, "%s %u %u\n", nodes[i].path, major(nodes[i].rdev), minor(nodes[i].rdev));
+        }
+    }
+    fclose(f);
+    chmod(path, 0644);
+}
+
+// Restore nodes recorded in a hidden-state file left by a previous session (orphaned by a crash),
+// then remove the file. restore_hidden_nodes skips any whose device is gone, so a controller that
+// disconnected meanwhile leaves no dead node behind.
+static void restore_from_state_file(const char *path) {
+    if (path == NULL) {
+        return;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        return;
+    }
+    struct hidden_node nodes[MAX_HIDE_NODES];
+    memset(nodes, 0, sizeof(nodes));
+    int count = 0;
+    char line[320];
+    while (count < MAX_HIDE_NODES && fgets(line, sizeof(line), f) != NULL) {
+        char parsed[256];
+        unsigned int maj = 0;
+        unsigned int min = 0;
+        if (sscanf(line, "%255s %u %u", parsed, &maj, &min) == 3) {
+            snprintf(nodes[count].path, sizeof(nodes[count].path), "%s", parsed);
+            nodes[count].rdev = makedev(maj, min);
+            nodes[count].active = 1;
+            count++;
+        }
+    }
+    fclose(f);
+    restore_hidden_nodes(nodes, count);
+    unlink(path);
+}
+
 int main(int argc, char **argv) {
+    // Heal mode (no mirroring): restore nodes a crashed session left hidden, then exit. Invoked as
+    // `input_mirror --heal --hidden-state-file PATH`. Detected up front so the source/target
+    // positional args aren't required.
+    {
+        int heal = 0;
+        const char *state = NULL;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--heal") == 0) {
+                heal = 1;
+            } else if (strcmp(argv[i], "--hidden-state-file") == 0 && i + 1 < argc) {
+                state = argv[++i];
+            }
+        }
+        if (heal) {
+            restore_from_state_file(state);
+            return EXIT_SUCCESS;
+        }
+    }
+
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--pid-file PATH] [--heartbeat-file PATH]\n", argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -501,6 +606,7 @@ int main(int argc, char **argv) {
     const char *target_path = argv[2];
     const char *pid_file_path = NULL;
     const char *heartbeat_file_path = NULL;
+    const char *hidden_state_path = NULL;
     int home_as_back = 0;
     int combo_hold_kill_app = 0;
     int virtual_mouse = 0;
@@ -510,6 +616,11 @@ int main(int argc, char **argv) {
     for (int index = 3; index < argc; index++) {
         if (strcmp(argv[index], "--home-as-back") == 0) {
             home_as_back = 1;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--hidden-state-file") == 0 && index + 1 < argc) {
+            hidden_state_path = argv[++index];
             continue;
         }
 
@@ -649,13 +760,19 @@ int main(int argc, char **argv) {
     write_pid_file(pid_file_path);
     write_heartbeat_file(heartbeat_file_path);
 
+    // Heal anything a previous crashed session left hidden before we hide this session's set —
+    // self-cleaning across hard kills, independent of which controller is now connected.
+    restore_from_state_file(hidden_state_path);
+
     // Hide requested duplicate nodes now that the mirror is committed (source grabbed). Done after
-    // the grab so a failed start never disturbs the framework's device list.
+    // the grab so a failed start never disturbs the framework's device list. Record the hidden set
+    // so a crash before clean exit can be healed.
     struct hidden_node hidden[MAX_HIDE_NODES];
     memset(hidden, 0, sizeof(hidden));
     for (int i = 0; i < hide_count; i++) {
         hide_node(hide_paths[i], &hidden[i]);
     }
+    write_hidden_state(hidden_state_path, hidden, hide_count);
 
     struct input_event event;
     int select_pressed = 0;
@@ -941,18 +1058,23 @@ int main(int argc, char **argv) {
             abs_last[event.code] = event.value;
         }
 
-        if (write_full(target_fd, &event, sizeof(event)) != 0) {
+        if (write_event_tolerant(target_fd, &event) != 0) {
             fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
             break;
         }
     }
 
+    // Restore the hidden nodes FIRST — highest-priority cleanup, so a KILL escalation racing this
+    // shutdown is least likely to leave them orphaned. Then drop the state file: a clean exit has
+    // nothing left to heal.
+    restore_hidden_nodes(hidden, hide_count);
+    if (hidden_state_path != NULL) {
+        unlink(hidden_state_path);
+    }
+
     if (ioctl(source_fd, EVIOCGRAB, 0) < 0) {
         fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
-
-    // Bring the hidden duplicate nodes back so the framework re-enumerates the controller.
-    restore_hidden_nodes(hidden, hide_count);
 
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);

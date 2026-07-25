@@ -57,5 +57,8 @@ internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
+// Give the daemon time to run its cleanup (restore hidden nodes, destroy uinput devices) on SIGTERM
+// before escalating to SIGKILL. 0.5s comfortably covers the restore (a handful of syscalls) even
+// under load, so a stop never orphans a hidden node.
 internal const val STOP_MIRROR_COMMAND =
-    "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.15; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"
+    "pids=\$(pidof input_mirror 2>/dev/null); [ -z \"\$pids\" ] && exit 0; kill -TERM \$pids 2>/dev/null; sleep 0.5; for pid in \$pids; do [ -d /proc/\$pid ] && kill -KILL \$pid 2>/dev/null; done; exit 0"

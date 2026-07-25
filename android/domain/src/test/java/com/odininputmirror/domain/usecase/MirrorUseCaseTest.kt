@@ -496,6 +496,8 @@ private class FakeMirrorProcessRepository(
     override fun clearProcessFiles() {
         clearProcessFilesCount += 1
     }
+
+    override fun healOrphanedHideNodes() {}
 }
 
 private class FakeMirrorSettingsRepository(

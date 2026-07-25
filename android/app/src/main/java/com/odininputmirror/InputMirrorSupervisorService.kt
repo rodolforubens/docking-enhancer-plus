@@ -70,6 +70,12 @@ class InputMirrorSupervisorService : Service() {
                 // while the auto-mirror decision below still uses the dock-gated list.
                 val allDevices = graph.inputDeviceRepository.getConnectedControllers()
                 val mirrorRunning = graph.processRepository.isRunning()
+                // While nothing is running, heal any node a crashed daemon left hidden so a stuck,
+                // invisible external controller can recover on its own (no-op unless there's a
+                // hidden-state record to restore).
+                if (!mirrorRunning) {
+                    runCatching { graph.processRepository.healOrphanedHideNodes() }
+                }
                 publishSnapshot(settings, dockActive, allDevices, mirrorRunning)
 
                 if (!settings.autoMirrorEnabled) {

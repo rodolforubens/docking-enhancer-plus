@@ -127,6 +127,34 @@ class RootMirrorProcessRepositoryTest {
         assertTrue(command.contains(" --virtual-mouse"))
         assertTrue(command.contains("--pid-file '${files.pidFile.absolutePath}'"))
         assertTrue(command.contains("--heartbeat-file '${files.heartbeatFile.absolutePath}'"))
+        assertTrue(command.contains("--hidden-state-file '${files.hiddenStateFile.absolutePath}'"))
+    }
+
+    @Test
+    fun healIsNoOpWhenNoHiddenStateFile() {
+        repository.healOrphanedHideNodes()
+
+        assertTrue(shell.executed.isEmpty())
+    }
+
+    @Test
+    fun healIsNoOpWhenHiddenStateFileEmpty() {
+        files.hiddenStateFile.writeText("")
+
+        repository.healOrphanedHideNodes()
+
+        assertTrue(shell.executed.isEmpty())
+    }
+
+    @Test
+    fun healRunsDaemonHealModeWhenHiddenStateFilePresent() {
+        files.hiddenStateFile.writeText("/dev/input/event10 13 74\n")
+
+        repository.healOrphanedHideNodes()
+
+        val command = shell.executed.single()
+        assertTrue(command.contains(" --heal "))
+        assertTrue(command.contains("--hidden-state-file '${files.hiddenStateFile.absolutePath}'"))
     }
 
     @Test

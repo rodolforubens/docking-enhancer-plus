@@ -20,6 +20,11 @@ internal class InputMirrorFiles(
     val heartbeatFile: File
         get() = File(filesDir, "input_mirror.heartbeat")
 
+    // Record of the /dev/input nodes the running daemon has hidden (path + device number). Survives
+    // a crash so the daemon's --heal mode can restore an orphaned node the crash left behind.
+    val hiddenStateFile: File
+        get() = File(filesDir, "input_mirror.hidden")
+
     fun ensureBinaryInstalled(): File {
         val binDir = File(filesDir, "bin")
         if (!binDir.exists()) {
