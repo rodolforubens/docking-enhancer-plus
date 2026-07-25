@@ -251,7 +251,11 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
 
     if (pickerOpen) {
         InternalControllerPicker(
-            devices = state.devices,
+            // Drop whatever is currently acting as the external pad: this list answers "which one is
+            // built into the handheld?", and the mirror source is never that. Matching on path keeps
+            // a placeholder external (resolved from saved identity, absent from the list) from
+            // filtering anything out. "Automatic (detect)" stays available to undo a wrong pick.
+            devices = state.devices.filter { it.path != state.externalDevice?.path },
             selectedGuid = state.manualInternalGuid,
             onSelect = { guid ->
                 pickerOpen = false
