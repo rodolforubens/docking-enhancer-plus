@@ -49,8 +49,13 @@ internal class RootMirrorProcessRepository(
             return
         }
         val binary = files.ensureBinaryInstalled()
+        // Never heal while a daemon is alive. isRunning() judges liveness by heartbeat freshness, so
+        // a mirror starved of CPU for a few seconds reads as dead — healing on that would recreate
+        // the very node it still has hidden and hand the framework a duplicate pad mid-session. The
+        // daemon restores its own nodes on exit, so a live one is never the orphan we are after.
         shell.exec(
-            "${binary.absolutePath.shellQuote()} --heal --hidden-state-file ${stateFile.absolutePath.shellQuote()}"
+            "pidof input_mirror >/dev/null 2>&1 && exit 0; " +
+                "${binary.absolutePath.shellQuote()} --heal --hidden-state-file ${stateFile.absolutePath.shellQuote()}"
         )
     }
 
