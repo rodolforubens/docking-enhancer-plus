@@ -24,6 +24,11 @@ static const long long HEARTBEAT_INTERVAL_MS = 1000;
 // down the whole mirror.
 static const int TARGET_WRITE_RETRIES = 3;
 
+// Events pulled from the source in a single read(). evdev returns whole events only, so one read
+// coalesces a frame's worth of axis+button+SYN events instead of one syscall each. 32 is ample —
+// a single frame rarely exceeds ~10 events; any overflow is drained by the next loop.
+#define EVENT_BATCH_SIZE 32
+
 // Virtual mouse mode (opt-in via --virtual-mouse). Select+R3 held this long toggles the mode; while
 // on, the grabbed controller drives a self-created uinput pointer instead of the target node.
 static const long long MOUSE_TOGGLE_HOLD_MS = 500;
@@ -1059,8 +1064,11 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        struct input_event event;
-        ssize_t bytes_read = read(s.source_fd, &event, sizeof(event));
+        // Drain every event the source has queued in one read(). The mode is decided once per
+        // batch (maybe_toggle_mouse_mode above); a batch spans microseconds, far below the 500ms
+        // toggle hold, so processing it under a single mode matches the old event-at-a-time loop.
+        struct input_event events[EVENT_BATCH_SIZE];
+        ssize_t bytes_read = read(s.source_fd, events, sizeof(events));
         if (bytes_read == 0) {
             break;
         }
@@ -1071,29 +1079,39 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Read error from %s: %s\n", source_path, strerror(errno));
             break;
         }
-        if ((size_t)bytes_read != sizeof(event)) {
+        size_t event_count = (size_t)bytes_read / sizeof(struct input_event);
+        if (event_count == 0) {
             fprintf(stderr, "Short read from %s: %zd bytes\n", source_path, bytes_read);
             continue;
         }
 
-        // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
-        if (event.type == EV_KEY) {
-            update_combo_tracking(&s, &event);
+        int fatal_write_error = 0;
+        for (size_t i = 0; i < event_count; i++) {
+            struct input_event *event = &events[i];
+
+            // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
+            if (event->type == EV_KEY) {
+                update_combo_tracking(&s, event);
+            }
+
+            if (handle_home_as_back(&s, event)) {
+                continue;
+            }
+
+            handle_kill_combo_event(&s, event);
+
+            if (s.mouse_mode) {
+                handle_mouse_event(&s, event);
+                continue;
+            }
+
+            if (forward_event(&s, event) != 0) {
+                fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
+                fatal_write_error = 1;
+                break;
+            }
         }
-
-        if (handle_home_as_back(&s, &event)) {
-            continue;
-        }
-
-        handle_kill_combo_event(&s, &event);
-
-        if (s.mouse_mode) {
-            handle_mouse_event(&s, &event);
-            continue;
-        }
-
-        if (forward_event(&s, &event) != 0) {
-            fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
+        if (fatal_write_error) {
             break;
         }
     }
