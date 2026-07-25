@@ -1,0 +1,33 @@
+# Line endings and binary safety.
+#
+# Without this, a contributor on Linux/macOS and one on Windows rewrite each other's line endings
+# and every review fills up with phantom diffs.
+
+# Store everything LF in the repo; check out with whatever the platform prefers.
+* text=auto
+
+# These run on Linux (Android's shell, or the Gradle wrapper) and MUST keep LF. A CRLF shell script
+# fails on-device with errors that point nowhere near the real cause — `e2e.sh` is pushed to the
+# handheld and would break on a fresh Windows clone.
+*.sh   text eol=lf
+gradlew text eol=lf
+
+# These are read by Windows tooling, which expects CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# The prebuilt mirror daemon is an ELF binary that ships to devices. Git detects that by heuristic
+# today; declaring it guarantees the `text=auto` rule above can never "normalise" — and corrupt —
+# the binary users actually run.
+android/app/src/main/assets/input_mirror/input_mirror binary
+
+# Other binaries, never to be treated as text.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.webp    binary
+*.apk     binary
+*.aab     binary
+*.jks     binary
+*.keystore binary

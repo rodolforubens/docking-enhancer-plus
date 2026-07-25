@@ -18,8 +18,25 @@
 ## Commands (source of truth: Gradle files)
 - Build debug APK (from repo root): `.\android\gradlew.bat -p .\android :app:assembleDebug`
 - Install: `adb install -r .\android\app\build\outputs\apk\debug\app-debug.apk`
-- Domain unit tests: from `android/`, run `./gradlew :domain:test`
+- Unit tests: from `android/`, run `./gradlew :domain:test :data:testDebugUnitTest`. `:domain` is a
+  plain JVM module, so its task is `test` — `:domain:testDebugUnitTest` does not exist.
+- Compile without packaging (fastest sanity check): `./gradlew :app:compileDebugKotlin`
 - Build native mirror binary: `powershell -ExecutionPolicy Bypass -File scripts/build-input-mirror.ps1`
+- Release APK: `./gradlew :app:assembleRelease`. Left UNSIGNED unless `android/keystore.properties`
+  exists — deliberate, so a missing keystore never silently ships a debug-signed build.
+
+## Bringing the project up
+- Needs JDK 17, Android SDK (compileSdk 35), and an NDK for the native binary. Build scripts read
+  `ANDROID_NDK_HOME` and otherwise fall back to the newest NDK under `%LOCALAPPDATA%\Android\Sdk\ndk`.
+- Needs a physical handheld exposing `PServerBinder`. **There is no emulator path**: no such service,
+  no internal controller node to write into, and no external pad to grab.
+- `FORCE_DOCK_MODE_FOR_DEV` in `android/app/build.gradle` makes a debug build behave as if docked, so
+  the mirror runs without an external display. Set it back to `false` before committing.
+- Debug and release are signed with different keys, so switching between them forces an uninstall,
+  which wipes settings (`allowBackup="false"`). Expect to re-enable the toggles afterwards; only
+  `autoMirrorEnabled` defaults back to true.
+- From Git Bash, call adb through PowerShell. Git Bash rewrites `/data/local/tmp/...` into a Windows
+  path, and the command fails with a `No such file or directory` that points nowhere near the cause.
 
 ## Native binary flow (non-obvious)
 - Core mirroring is native C: `android/app/src/main/native/input_mirror.c`.
@@ -34,6 +51,39 @@
 - Start/stop/restart is decided every tick by `ResolveAutoMirrorDecisionUseCase`, driven from the foreground service `InputMirrorSupervisorService`; it only acts while `autoMirrorEnabled` is true and the device is docked.
 - Liveness is heartbeat/pid based in data layer (`RootMirrorProcessRepository` + process files), not just a simple process-name check.
 - Toggling the UI switches (`homeAsBack`, `comboHoldKillApp`, `virtualMouse`) must only persist settings; the mirror starts/stops via the supervisor and `startMirror`/`stopMirror`. If the mirror is running with different flags, the supervisor detects it (persisted `started*` snapshot vs current settings) and restarts it automatically.
+
+## Testing
+- Unit tests cover the pure logic: use cases, device resolution, settings, process/file handling.
+- Everything that only breaks on real hardware — evdev grabs, `/dev/input` node lifetimes, SELinux
+  labels, a root daemon outliving its app — is covered by the on-device e2e suite in
+  `.claude/skills/mirror-e2e/` (tracked; see its `SKILL.md`). Run it with:
+  `.\.claude\skills\mirror-e2e\scripts\build-harness.ps1` then `adb shell sh /data/local/tmp/e2e.sh`.
+- The suite drives synthetic uinput controllers, so no physical pad is needed and runs are
+  reproducible. It force-stops the app first; relaunch the app afterwards.
+- **No CI is possible** for any of that: every meaningful test needs the handheld attached. Unit
+  tests and compilation are all a machine without a device can verify.
+- A change to the daemon or the hide/restore paths is not done until the e2e suite passes on-device.
+  Compiling is not evidence — these are failure paths, and they only fail on hardware.
+
+## Commit conventions
+- Conventional Commits: `<type>(<scope>): <imperative summary>`, subject ≤50 chars (hard cap 72), no
+  trailing period.
+- Body only when the "why" is not obvious from the diff. Explain intent and consequence, not a
+  file-by-file recap of what the diff already shows.
+- **Never** add a `Co-Authored-By: Claude` trailer, or any other AI attribution, to a commit.
+- Rebuild and commit `assets/input_mirror/input_mirror` in the SAME commit as the `input_mirror.c`
+  change it was built from. That binary is tracked and shipped; letting it drift from its source
+  means the repo describes one daemon and runs another.
+
+## Device realities that cost time
+- The handheld republishes any external controller under its own vendor id (`0x2020`) and deletes the
+  original node. That is why the real external pad often has no `/dev` entry of its own, and why a
+  synthetic pad with a foreign vendor id never keeps one.
+- `getevent` labels `0x130` as `BTN_GAMEPAD`; `BTN_SOUTH` and `BTN_A` are aliases of the same code.
+  Asserting on the wrong alias reads as a forwarding bug that is not there.
+- The input core drops an absolute event repeating its current value, so a synthetic axis burst must
+  alternate values or half of it silently vanishes.
+- Bluetooth pads sleep on their own mid-session. A mirror that "stopped working" is usually that.
 
 ## Known install quirk on Odin
 - Install may fail with `Failed to parse APK file` / `avc ... Permission denied` even when build succeeds.
