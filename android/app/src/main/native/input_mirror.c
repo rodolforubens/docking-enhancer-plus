@@ -246,21 +246,21 @@ static int write_pid_file(const char *pid_file_path) {
     return 0;
 }
 
-static int write_heartbeat_file(const char *heartbeat_file_path) {
+// Open the heartbeat file once, to be rewritten in place for the life of the run. Keeping the fd
+// avoids an open/close pair every second in the mirror loop.
+static int open_heartbeat_file(const char *heartbeat_file_path) {
     if (heartbeat_file_path == NULL) {
-        return 0;
-    }
-
-    FILE *heartbeat_file = fopen(heartbeat_file_path, "w");
-    if (heartbeat_file == NULL) {
-        fprintf(stderr, "Failed to open heartbeat file %s: %s\n", heartbeat_file_path, strerror(errno));
         return -1;
     }
 
-    fprintf(heartbeat_file, "%lld\n", now_ms());
-    fclose(heartbeat_file);
+    int fd = open(heartbeat_file_path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "Failed to open heartbeat file %s: %s\n", heartbeat_file_path, strerror(errno));
+        return -1;
+    }
+    // Explicit, since umask can strip bits off the O_CREAT mode: the app reads this root-owned file.
     chmod(heartbeat_file_path, 0644);
-    return 0;
+    return fd;
 }
 
 // One analog axis of the source controller, normalised so deflection reads as [-1, 1].
@@ -592,6 +592,7 @@ struct mirror_state {
     int touch_fd;   // cursor-hiding touch helper (created once per run)
 
     const char *heartbeat_file_path;
+    int heartbeat_fd;  // held open for the whole run; rewritten in place each beat
     int home_as_back;
     int combo_hold_kill_app;
     int virtual_mouse;
@@ -626,6 +627,41 @@ struct mirror_state {
     int abs_neutral[ABS_CNT];
     int abs_last[ABS_CNT];
 };
+
+// Stamp the heartbeat by rewriting the held-open file in place. The watchdog on the app side only
+// checks that the file is non-empty and its mtime is recent, and a write updates mtime — so this is
+// equivalent to the old rewrite-from-scratch, minus an open/close pair per second. A write failure
+// drops the fd so the next beat reopens, keeping the old code's self-healing behaviour.
+static void write_heartbeat(struct mirror_state *s) {
+    if (s->heartbeat_file_path == NULL) {
+        return;
+    }
+    if (s->heartbeat_fd < 0) {
+        s->heartbeat_fd = open_heartbeat_file(s->heartbeat_file_path);
+        if (s->heartbeat_fd < 0) {
+            return;
+        }
+    }
+
+    char stamp[32];
+    int length = snprintf(stamp, sizeof(stamp), "%lld\n", now_ms());
+    if (length <= 0 || (size_t)length >= sizeof(stamp)) {
+        return;
+    }
+
+    if (pwrite(s->heartbeat_fd, stamp, (size_t)length, 0) != (ssize_t)length) {
+        fprintf(stderr, "Failed to write heartbeat file %s: %s\n", s->heartbeat_file_path, strerror(errno));
+        close(s->heartbeat_fd);
+        s->heartbeat_fd = -1;
+        return;
+    }
+
+    // Trim any tail left by a longer previous stamp. now_ms() is monotonic so this never actually
+    // shortens in practice; keeping it makes the file exact regardless.
+    if (ftruncate(s->heartbeat_fd, (off_t)length) != 0) {
+        // Harmless: a stale tail byte doesn't affect the reader, which only checks mtime and size.
+    }
+}
 
 // Poll timeout for the next iteration: fast while a hold combo is pending (to catch the threshold
 // without new events) or in mouse mode (frame cadence), otherwise idle at 1s (heartbeat rate).
@@ -935,6 +971,7 @@ int main(int argc, char **argv) {
     memset(&s, 0, sizeof(s));
     s.uinput_fd = -1;
     s.touch_fd = -1;
+    s.heartbeat_fd = -1;
     s.heartbeat_file_path = heartbeat_file_path;
     s.home_as_back = home_as_back;
     s.combo_hold_kill_app = combo_hold_kill_app;
@@ -1013,7 +1050,7 @@ int main(int argc, char **argv) {
     }
 
     write_pid_file(pid_file_path);
-    write_heartbeat_file(heartbeat_file_path);
+    write_heartbeat(&s);
 
     // Heal anything a previous crashed session left hidden before we hide this session's set —
     // self-cleaning across hard kills, independent of which controller is now connected.
@@ -1034,7 +1071,7 @@ int main(int argc, char **argv) {
 
         long long heartbeat_now_ms = now_ms();
         if (heartbeat_now_ms - s.last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
-            write_heartbeat_file(s.heartbeat_file_path);
+            write_heartbeat(&s);
             s.last_heartbeat_ms = heartbeat_now_ms;
         }
 
@@ -1140,6 +1177,9 @@ int main(int argc, char **argv) {
     close(s.source_fd);
     if (pid_file_path != NULL) {
         unlink(pid_file_path);
+    }
+    if (s.heartbeat_fd >= 0) {
+        close(s.heartbeat_fd);
     }
     if (heartbeat_file_path != NULL) {
         unlink(heartbeat_file_path);
