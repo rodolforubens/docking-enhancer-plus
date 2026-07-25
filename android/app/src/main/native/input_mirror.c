@@ -19,6 +19,11 @@
 static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
 static const long long HEARTBEAT_INTERVAL_MS = 1000;
+// Consecutive beats the heartbeat path may stay missing before we conclude this daemon has no owner
+// left and shut down. The app deletes that path exactly when it wants us gone (it was uninstalled,
+// its data was cleared, or it is abandoning a duplicate launch), so five seconds of absence is
+// decisive without being twitchy.
+static const int HEARTBEAT_MISSING_LIMIT = 5;
 // Transient write errors to the target (the internal controller, which almost never truly
 // disappears) are retried this many times before giving up — so a momentary hiccup doesn't tear
 // down the whole mirror.
@@ -459,6 +464,18 @@ struct hidden_node {
     int active;  // 1 once we successfully unlinked it (so restore should recreate it)
 };
 
+// How many nodes are still hidden, i.e. still owed a restore. Drives whether the hidden-state file
+// is kept for a later --heal or dropped as fully settled.
+static int count_active_hidden(const struct hidden_node *nodes, int count) {
+    int active = 0;
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].active) {
+            active++;
+        }
+    }
+    return active;
+}
+
 // Unlink a /dev/input node so Android's EventHub drops it from the device list (it watches
 // /dev/input for IN_DELETE) — WITHOUT disturbing any process that already holds an open fd on it
 // (POSIX: unlink removes the name, not the open description). The mirror never reads these nodes;
@@ -533,7 +550,13 @@ static void restore_hidden_nodes(struct hidden_node *nodes, int count) {
             fprintf(stderr, "restore: link %s failed: %s\n", n->path, strerror(errno));
         }
         unlink(tmp);
-        n->active = 0;
+        // Settle this node only once the name is really back — the filesystem, not the return code,
+        // is the authority. A link() that failed with EEXIST means it returned on its own (fine);
+        // any other failure means it is STILL hidden, and clearing the flag there would drop it from
+        // the state file and strand the user's controller with nothing left to heal it.
+        if (access(n->path, F_OK) == 0) {
+            n->active = 0;
+        }
     }
 }
 
@@ -585,7 +608,13 @@ static void restore_from_state_file(const char *path) {
     }
     fclose(f);
     restore_hidden_nodes(nodes, count);
-    unlink(path);
+    // Keep whatever refused to come back so the next heal tries again; a heal that restored
+    // everything (or found the devices gone) has nothing left to record.
+    if (count_active_hidden(nodes, count) > 0) {
+        write_hidden_state(path, nodes, count);
+    } else {
+        unlink(path);
+    }
 }
 
 // All state carried across mirror-loop iterations: the fds, the option flags, and the runtime state
@@ -599,6 +628,7 @@ struct mirror_state {
 
     const char *heartbeat_file_path;
     int heartbeat_fd;  // held open for the whole run; rewritten in place each beat
+    int heartbeat_missing_beats;  // consecutive beats the heartbeat PATH has been gone
     int home_as_back;
     int combo_hold_kill_app;
     int virtual_mouse;
@@ -645,9 +675,26 @@ static void write_heartbeat(struct mirror_state *s) {
     }
     if (s->heartbeat_fd < 0) {
         s->heartbeat_fd = open_heartbeat_file(s->heartbeat_file_path);
-        if (s->heartbeat_fd < 0) {
-            return;
+    }
+
+    // Owner watchdog. Deliberately tests the PATH, never the fd: unlinking a file does not disturb an
+    // open description, so a daemon whose app was uninstalled goes on writing happily to an inode
+    // nobody can reach — grabbing the user's controller and keeping its node hidden with no app left
+    // to stop or heal it. The app deletes this path only when it wants this daemon gone, so treat a
+    // sustained absence as our cue to leave through the normal shutdown, which restores what we hid.
+    // Placed after the open above so the first beat CREATES the file instead of tripping on it.
+    if (access(s->heartbeat_file_path, F_OK) != 0) {
+        if (++s->heartbeat_missing_beats >= HEARTBEAT_MISSING_LIMIT) {
+            fprintf(stderr, "heartbeat file %s missing for %d beats; shutting down\n",
+                    s->heartbeat_file_path, s->heartbeat_missing_beats);
+            keep_running = 0;
         }
+        return;
+    }
+    s->heartbeat_missing_beats = 0;
+
+    if (s->heartbeat_fd < 0) {
+        return;
     }
 
     char stamp[32];
@@ -1174,7 +1221,14 @@ int main(int argc, char **argv) {
     // nothing left to heal.
     restore_hidden_nodes(hidden, hide_count);
     if (hidden_state_path != NULL) {
-        unlink(hidden_state_path);
+        // Drop the file only on a restore that actually settled everything. If a node is still
+        // hidden, leave the record behind: the supervisor's next heal is the user's only remaining
+        // path back to a visible controller.
+        if (count_active_hidden(hidden, hide_count) > 0) {
+            write_hidden_state(hidden_state_path, hidden, hide_count);
+        } else {
+            unlink(hidden_state_path);
+        }
     }
 
     if (ioctl(s.source_fd, EVIOCGRAB, 0) < 0) {
