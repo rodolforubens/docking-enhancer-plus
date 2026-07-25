@@ -167,6 +167,140 @@ class AndroidInputDeviceRepositoryTest {
     }
 
     @Test
+    fun externalControllerResolvesItsOdinQuirkTwinPath() {
+        // Real BT node + the Odin re-exposed twin. The resolved device is the real node; its twin
+        // (quirk vendor 0x2020, same name) is what the hide-external feature unlinks.
+        val candidate = ControllerCandidate(
+            name = "8BitDo Ultimate 2C Wireless",
+            vendorId = 0x2dc8,
+            productId = 0x301b,
+            controllerNumber = 3,
+            guid = "guid-8bitdo-bt",
+        )
+        val entries = listOf(
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_BLUETOOTH, vendorId = 0x2dc8, productId = 0x301b, eventName = "event9"),
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+        val mirroredNames = repository.computeMirroredNames(entries)
+
+        val result = repository.resolveControllerDevice(candidate, entries, mirroredNames)
+
+        assertEquals("/dev/input/event9", result?.path)
+        assertEquals("/dev/input/event10", result?.hideNodePath)
+    }
+
+    @Test
+    fun externalWithoutRealDevNodeHidesTheReExposedNodeItself() {
+        // The firmware exposes only the Odin re-exposed node in /dev (the real BT node has no /dev
+        // entry). The mirror source IS the quirk node, and that same node is the hide target.
+        val repoNoRealDev = AndroidInputDeviceRepository(pathExists = { it != "/dev/input/event9" })
+        val candidate = ControllerCandidate(
+            name = "8BitDo Ultimate 2C Wireless",
+            vendorId = ODIN_VENDOR,
+            productId = 0x0111,
+            controllerNumber = 3,
+            guid = "guid-8bitdo",
+        )
+        val entries = listOf(
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_BLUETOOTH, vendorId = 0x2dc8, productId = 0x301b, eventName = "event9"),
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+        val mirroredNames = repoNoRealDev.computeMirroredNames(entries)
+
+        val result = repoNoRealDev.resolveControllerDevice(candidate, entries, mirroredNames)
+
+        assertEquals("/dev/input/event10", result?.path)
+        assertEquals("/dev/input/event10", result?.hideNodePath)
+        assertFalse(result?.isInternal == true)
+    }
+
+    // -- hiddenSourceDevice (re-materialise a hidden mirror source from /proc) -----------
+
+    @Test
+    fun hiddenSourceIsRematerialisedWhenRunningAndItsDevNodeIsGone() {
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { false }, // the source's /dev node was unlinked (hidden)
+            hiddenSourcePathProvider = { "/dev/input/event10" },
+            mirrorRunningProvider = { true },
+        )
+        val entries = listOf(
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+
+        val result = repo.hiddenSourceDevice(resolved = emptyList(), procEntries = entries)
+
+        assertEquals(1, result.size)
+        assertEquals("/dev/input/event10", result[0].path)
+        assertEquals("/dev/input/event10", result[0].hideNodePath)
+        assertEquals(guidOf(ODIN_VENDOR, 0x0111), result[0].guid)
+        assertFalse(result[0].isInternal)
+    }
+
+    @Test
+    fun hiddenSourceNotRematerialisedWhenMirrorNotRunning() {
+        // A stale persisted source (its /dev node absent) must NOT be revived while nothing runs —
+        // otherwise it blocks restarting on the live node after a reconnect.
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { false },
+            hiddenSourcePathProvider = { "/dev/input/event10" },
+            mirrorRunningProvider = { false },
+        )
+        val entries = listOf(
+            procEntry(name = "8BitDo Ultimate 2C Wireless", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+
+        assertTrue(repo.hiddenSourceDevice(resolved = emptyList(), procEntries = entries).isEmpty())
+    }
+
+    @Test
+    fun hiddenSourceNotRematerialisedWhenDevNodeStillPresent() {
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { true }, // node present → not hidden, framework already has it
+            hiddenSourcePathProvider = { "/dev/input/event10" },
+            mirrorRunningProvider = { true },
+        )
+        val entries = listOf(
+            procEntry(name = "Pad", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+
+        assertTrue(repo.hiddenSourceDevice(resolved = emptyList(), procEntries = entries).isEmpty())
+    }
+
+    @Test
+    fun hiddenSourceNotRematerialisedWhenAlreadyResolved() {
+        val repo = AndroidInputDeviceRepository(
+            pathExists = { false },
+            hiddenSourcePathProvider = { "/dev/input/event10" },
+            mirrorRunningProvider = { true },
+        )
+        val entries = listOf(
+            procEntry(name = "Pad", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0111, eventName = "event10"),
+        )
+        val already = listOf(ControllerDevice(name = "Pad", path = "/dev/input/event10", guid = "g", controllerNumber = 1))
+
+        assertTrue(repo.hiddenSourceDevice(resolved = already, procEntries = entries).isEmpty())
+    }
+
+    @Test
+    fun internalControllerHasNoQuirkTwinPath() {
+        // The chosen node is itself the quirk-vendor one → there is no separate twin to hide.
+        val candidate = ControllerCandidate(
+            name = "Xbox Wireless Controller",
+            vendorId = ODIN_VENDOR,
+            productId = 0x0112,
+            controllerNumber = 1,
+            guid = "guid-xbox",
+        )
+        val entries = listOf(
+            procEntry(name = "Xbox Wireless Controller", bus = BUS_USB, vendorId = ODIN_VENDOR, productId = 0x0112, eventName = "event7"),
+        )
+
+        val result = repository.resolveControllerDevice(candidate, entries, mirroredNames = emptySet())
+
+        assertNull(result?.hideNodePath)
+    }
+
+    @Test
     fun unknownHandheldInternalPadIsNotClassifiedAsInternalBySignature() {
         // A non-Odin handheld: its built-in pad uses an unrecognised vendor, so no signature
         // matches and it is NOT auto-flagged internal. Such devices rely on manual selection.

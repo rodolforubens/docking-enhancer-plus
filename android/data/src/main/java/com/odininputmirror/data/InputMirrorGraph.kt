@@ -29,14 +29,16 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
 
     val settingsRepository: MirrorSettingsRepository = AndroidMirrorSettingsRepository(appContext)
     val dockStateRepository: DockStateRepository = AndroidDisplayDockStateRepository(appContext, forceDockMode)
-    val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(
-        shell = shell,
-        manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },
-    )
     val processRepository: MirrorProcessRepository = RootMirrorProcessRepository(
         mirrorSettingsRepository = settingsRepository,
         files = InputMirrorFiles(appContext),
         shell = shell,
+    )
+    val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(
+        shell = shell,
+        manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },
+        hiddenSourcePathProvider = { settingsRepository.getSettings().source },
+        mirrorRunningProvider = { processRepository.isRunning() },
     )
 
     val getConnectedDevices = GetConnectedDevicesUseCase(inputDeviceRepository)

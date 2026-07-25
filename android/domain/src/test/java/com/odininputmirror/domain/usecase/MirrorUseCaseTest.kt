@@ -309,6 +309,41 @@ class MirrorUseCaseTest {
     }
 
     @Test
+    fun autoMirrorAlwaysPassesTheExternalsHideNode() {
+        // Hiding the external is the default behaviour, not a toggle.
+        val external = externalController(
+            path = "/dev/input/event9",
+            guid = "ext",
+            hideNodePath = "/dev/input/event10",
+        )
+        val local = localController(path = "/dev/input/event2", guid = "odin")
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, external),
+            settings = MirrorSettings(),
+            mirrorRunning = false,
+        )
+
+        assertEquals(listOf("/dev/input/event10"), (decision as AutoMirrorDecision.Start).request.hideNodes)
+    }
+
+    @Test
+    fun autoMirrorHideNodesEmptyWhenExternalHasNoHideNode() {
+        val external = externalController(path = "/dev/input/event9", guid = "ext", hideNodePath = null)
+        val local = localController(path = "/dev/input/event2", guid = "odin")
+
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = listOf(local, external),
+            settings = MirrorSettings(),
+            mirrorRunning = false,
+        )
+
+        assertTrue((decision as AutoMirrorDecision.Start).request.hideNodes.isEmpty())
+    }
+
+    @Test
     fun autoMirrorRestartsWhenOptionFlagsChangedSinceStart() {
         // Daemon launched with virtualMouse off; the user toggled it on afterwards. Same devices,
         // still running — but the stale daemon must be restarted with the new flags.
@@ -409,12 +444,14 @@ class MirrorUseCaseTest {
         path: String = "/dev/input/event9",
         guid: String = "external-guid",
         controllerNumber: Int = 2,
+        hideNodePath: String? = null,
     ) = ControllerDevice(
         name = "External Controller",
         path = path,
         guid = guid,
         controllerNumber = controllerNumber,
         handlers = listOf("event${path.substringAfterLast("event")}"),
+        hideNodePath = hideNodePath,
     )
 
     private fun localController(

@@ -9,6 +9,13 @@ internal class AndroidInputDeviceRepository(
     private val shell: MirrorShell = UnavailableShell,
     private val pathExists: (String) -> Boolean = { File(it).exists() },
     private val manualInternalGuidProvider: () -> String? = { null },
+    // Path of the mirror source we may have hidden (its /dev node unlinked). Lets us re-materialise
+    // it from /proc so the UI and auto-mirror logic still see the controller being mirrored.
+    private val hiddenSourcePathProvider: () -> String? = { null },
+    // True only while the mirror is actually running. Gates re-materialisation so a STALE persisted
+    // source (from a prior session, e.g. a real node that never has a /dev entry) is never revived
+    // when nothing is running — which would otherwise block restarting on the live node.
+    private val mirrorRunningProvider: () -> Boolean = { false },
 ) : InputDeviceRepository {
     override fun getConnectedControllers(): List<ControllerDevice> {
         val procEntries = shell.read("cat /proc/bus/input/devices")
@@ -17,17 +24,50 @@ internal class AndroidInputDeviceRepository(
 
         val mirroredNames = computeMirroredNames(procEntries)
 
-        val devices = InputDevice.getDeviceIds()
+        val framework = InputDevice.getDeviceIds()
             .asSequence()
             .mapNotNull { id -> InputDevice.getDevice(id) }
             .filter { device -> isPhysicalGameController(device) }
             .map { it.toCandidate() }
             .mapNotNull { candidate -> resolveControllerDevice(candidate, procEntries, mirroredNames) }
             .distinctBy { it.path }
-            .sortedBy { it.controllerNumber }
             .toList()
 
+        val devices = (framework + hiddenSourceDevice(framework, procEntries))
+            .sortedBy { it.controllerNumber }
+
         return resolveInternalController(devices, manualInternalGuidProvider())
+    }
+
+    // When the hide-external feature has unlinked the mirror source's /dev node, the framework drops
+    // it from enumeration but its /proc entry persists. Rebuild a ControllerDevice from that entry so
+    // the external is still shown and still treated as present (it hides itself, so hideNodePath is
+    // its own path). Returns empty when the source isn't hidden (present in /dev, already resolved)
+    // or its /proc entry is gone (controller actually disconnected).
+    internal fun hiddenSourceDevice(
+        resolved: List<ControllerDevice>,
+        procEntries: List<ProcInputEntry>,
+    ): List<ControllerDevice> {
+        if (!mirrorRunningProvider()) {
+            return emptyList()
+        }
+        val hiddenSource = hiddenSourcePathProvider() ?: return emptyList()
+        if (resolved.any { it.path == hiddenSource } || pathExists(hiddenSource)) {
+            return emptyList()
+        }
+        val entry = procEntries.firstOrNull { it.path == hiddenSource } ?: return emptyList()
+        return listOf(
+            ControllerDevice(
+                name = entry.name,
+                path = entry.path,
+                guid = guidOf(entry.vendorId, entry.productId),
+                controllerNumber = 0,
+                handlers = entry.handlers,
+                isInternal = false,
+                isKnownInternal = false,
+                hideNodePath = entry.path,
+            ),
+        )
     }
 
     // Decides which controller is the internal one:
@@ -111,16 +151,38 @@ internal class AndroidInputDeviceRepository(
             )
             .firstOrNull()
             ?.let { entry ->
+                val isInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames
                 ControllerDevice(
                     name = entry.name,
                     path = entry.path,
                     guid = candidate.guid,
                     controllerNumber = candidate.controllerNumber,
                     handlers = entry.handlers,
-                    isInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames,
-                    isKnownInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames,
+                    isInternal = isInternal,
+                    isKnownInternal = isInternal,
+                    hideNodePath = resolveHideNodePath(isInternal, normalizedName, entries),
                 )
             }
+    }
+
+    // The framework surfaces an external controller as the Odin quirk (vendor 0x2020) node bearing
+    // its name — which may ALSO be the node the mirror reads as source when the firmware exposes
+    // only the re-exposed node in /dev. Either way that is the node the hide-external feature
+    // unlinks. Returns it (present in /dev) for an external controller; null for the internal one
+    // (never hide the mirror target) and when no such node exists.
+    private fun resolveHideNodePath(
+        isInternal: Boolean,
+        normalizedName: String,
+        entries: List<ProcInputEntry>,
+    ): String? {
+        if (isInternal) {
+            return null
+        }
+        return entries.firstOrNull { entry ->
+            entry.vendorId in MIRRORING_QUIRK_VENDOR_IDS &&
+                entry.name.lowercase() == normalizedName &&
+                pathExists(entry.path)
+        }?.path
     }
 
     internal fun parseProcInputBlock(block: String): ProcInputEntry? {
@@ -192,6 +254,10 @@ private fun InputDevice.toCandidate(): ControllerCandidate = ControllerCandidate
     guid = getGuid(),
 )
 
-private fun InputDevice.getGuid(): String = String.format("%016x%016x", productId, vendorId)
+private fun InputDevice.getGuid(): String = guidOf(vendorId, productId)
+
+// Controller GUID from vendor + product only — matches InputDevice.getGuid() so a device
+// re-materialised from /proc keeps the same identity the framework had assigned it.
+internal fun guidOf(vendorId: Int, productId: Int): String = String.format("%016x%016x", productId, vendorId)
 
 private fun Int.hasSource(source: Int): Boolean = this and source == source

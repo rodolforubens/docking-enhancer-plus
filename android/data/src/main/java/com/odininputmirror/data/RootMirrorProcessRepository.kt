@@ -20,6 +20,7 @@ internal class RootMirrorProcessRepository(
         val homeAsBackArg = if (request.homeAsBack) " --home-as-back" else ""
         val comboHoldKillAppArg = if (request.comboHoldKillApp) " --combo-hold-kill-app" else ""
         val virtualMouseArg = if (request.virtualMouse) " --virtual-mouse" else ""
+        val hideNodeArgs = request.hideNodes.joinToString("") { " --hide-node ${it.shellQuote()}" }
         val pidFileArg = " --pid-file ${files.pidFile.absolutePath.shellQuote()}"
         val heartbeatFileArg = " --heartbeat-file ${files.heartbeatFile.absolutePath.shellQuote()}"
         // Foreground invocation only; launchDaemon backgrounds it appropriately per backend. The
@@ -30,7 +31,7 @@ internal class RootMirrorProcessRepository(
         // that outlived a previous app session), bail out. The exclusive EVIOCGRAB would make the
         // second instance exit anyway, but this avoids the doomed spawn entirely.
         val launch =
-            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$pidFileArg$heartbeatFileArg"
+            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$hideNodeArgs$pidFileArg$heartbeatFileArg"
         val command = "pidof input_mirror >/dev/null 2>&1 && exit 0; $launch"
         if (!shell.launchDaemon(command)) {
             throw IllegalStateException("PServer could not deliver the mirror launch command")

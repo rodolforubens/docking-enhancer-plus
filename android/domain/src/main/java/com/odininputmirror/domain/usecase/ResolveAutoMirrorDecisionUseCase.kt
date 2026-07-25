@@ -25,6 +25,7 @@ class ResolveAutoMirrorDecisionUseCase {
             return AutoMirrorDecision.WaitingForExternalController
         }
 
+        // Hiding the external's framework-visible Odin node is the mirror's default behaviour.
         val request = MirrorStartRequest(
             source = external.path,
             target = local.path,
@@ -33,6 +34,7 @@ class ResolveAutoMirrorDecisionUseCase {
             homeAsBack = settings.homeAsBack,
             comboHoldKillApp = settings.comboHoldKillApp,
             virtualMouse = settings.virtualMouse,
+            hideNodes = listOfNotNull(external.hideNodePath),
         )
 
         val sameMirror = settings.sourceGuid == external.guid &&

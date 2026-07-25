@@ -10,7 +10,9 @@
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -417,9 +419,81 @@ static void flush_touch_cancel(int touch_fd) {
     emit_event(touch_fd, EV_SYN, SYN_REPORT, 0);
 }
 
+// Nodes hidden from the Android framework for the lifetime of this mirror (the external
+// controller's Odin quirk twin). See hide_node / restore_hidden_nodes.
+#define MAX_HIDE_NODES 8
+struct hidden_node {
+    char path[256];
+    dev_t rdev;  // device number captured before unlink, used to recreate the node on exit
+    int active;  // 1 once we successfully unlinked it (so restore should recreate it)
+};
+
+// Unlink a /dev/input node so Android's EventHub drops it from the device list (it watches
+// /dev/input for IN_DELETE) — WITHOUT disturbing any process that already holds an open fd on it
+// (POSIX: unlink removes the name, not the open description). The mirror never reads these nodes;
+// they are duplicate representations of the source we simply want gone while mirroring. Records the
+// device number so restore_hidden_nodes can recreate the node on exit.
+static void hide_node(const char *path, struct hidden_node *slot) {
+    memset(slot, 0, sizeof(*slot));
+    snprintf(slot->path, sizeof(slot->path), "%s", path);
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISCHR(st.st_mode)) {
+        fprintf(stderr, "hide: %s not a present char node, skipping\n", path);
+        return;
+    }
+    slot->rdev = st.st_rdev;
+    if (unlink(path) == 0) {
+        slot->active = 1;
+    } else {
+        fprintf(stderr, "hide: unlink %s failed: %s\n", path, strerror(errno));
+    }
+}
+
+// Recreate the nodes hidden by hide_node so the framework re-enumerates them when the mirror stops.
+// Only recreate when the underlying device still exists (/sys/dev/char/<maj>:<min>) — if the
+// controller disconnected, its input_dev is gone and the framework already dropped it; a mknod then
+// would leave a dead, unopenable node. The node is created OUTSIDE the watched dir with the correct
+// SELinux label and hardlinked in: EventHub opens it on the resulting IN_CREATE, and a label set
+// only after the node appears would lose that race and the device would never be listed.
+static void restore_hidden_nodes(struct hidden_node *nodes, int count) {
+    const char *tmp = "/dev/.input_mirror_restore";
+    const char *ctx = "u:object_r:input_device:s0";
+    for (int i = 0; i < count; i++) {
+        struct hidden_node *n = &nodes[i];
+        if (!n->active) {
+            continue;
+        }
+        char syschar[64];
+        snprintf(syschar, sizeof(syschar), "/sys/dev/char/%u:%u",
+                 major(n->rdev), minor(n->rdev));
+        if (access(syschar, F_OK) != 0) {
+            n->active = 0;  // device gone; nothing to restore
+            continue;
+        }
+        unlink(tmp);
+        if (mknod(tmp, S_IFCHR | 0666, n->rdev) != 0) {
+            fprintf(stderr, "restore: mknod for %s failed: %s\n", n->path, strerror(errno));
+            continue;
+        }
+        if (chown(tmp, 0, 1004) != 0) {  // root:input
+            // Non-fatal: EventHub can still open a root-owned node; log and continue.
+            fprintf(stderr, "restore: chown %s: %s\n", n->path, strerror(errno));
+        }
+        chmod(tmp, 0666);
+        if (setxattr(tmp, "security.selinux", ctx, strlen(ctx) + 1, 0) != 0) {
+            fprintf(stderr, "restore: setxattr %s: %s\n", n->path, strerror(errno));
+        }
+        if (link(tmp, n->path) != 0) {
+            fprintf(stderr, "restore: link %s failed: %s\n", n->path, strerror(errno));
+        }
+        unlink(tmp);
+        n->active = 0;
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--pid-file PATH] [--heartbeat-file PATH]\n", argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--pid-file PATH] [--heartbeat-file PATH]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -430,10 +504,21 @@ int main(int argc, char **argv) {
     int home_as_back = 0;
     int combo_hold_kill_app = 0;
     int virtual_mouse = 0;
+    const char *hide_paths[MAX_HIDE_NODES];
+    int hide_count = 0;
 
     for (int index = 3; index < argc; index++) {
         if (strcmp(argv[index], "--home-as-back") == 0) {
             home_as_back = 1;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--hide-node") == 0 && index + 1 < argc) {
+            if (hide_count < MAX_HIDE_NODES) {
+                hide_paths[hide_count++] = argv[++index];
+            } else {
+                index++;  // drop the value; capacity reached
+            }
             continue;
         }
 
@@ -563,6 +648,14 @@ int main(int argc, char **argv) {
 
     write_pid_file(pid_file_path);
     write_heartbeat_file(heartbeat_file_path);
+
+    // Hide requested duplicate nodes now that the mirror is committed (source grabbed). Done after
+    // the grab so a failed start never disturbs the framework's device list.
+    struct hidden_node hidden[MAX_HIDE_NODES];
+    memset(hidden, 0, sizeof(hidden));
+    for (int i = 0; i < hide_count; i++) {
+        hide_node(hide_paths[i], &hidden[i]);
+    }
 
     struct input_event event;
     int select_pressed = 0;
@@ -857,6 +950,9 @@ int main(int argc, char **argv) {
     if (ioctl(source_fd, EVIOCGRAB, 0) < 0) {
         fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
+
+    // Bring the hidden duplicate nodes back so the framework re-enumerates the controller.
+    restore_hidden_nodes(hidden, hide_count);
 
     if (uinput_fd >= 0) {
         ioctl(uinput_fd, UI_DEV_DESTROY);

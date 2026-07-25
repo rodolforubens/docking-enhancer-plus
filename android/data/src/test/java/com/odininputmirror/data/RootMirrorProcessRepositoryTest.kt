@@ -130,6 +130,37 @@ class RootMirrorProcessRepositoryTest {
     }
 
     @Test
+    fun startPassesHideNodeArgForEachHiddenNode() {
+        repository.start(
+            MirrorStartRequest(
+                source = "/dev/input/event9",
+                target = "/dev/input/event2",
+                homeAsBack = false,
+                comboHoldKillApp = false,
+                hideNodes = listOf("/dev/input/event10", "/dev/input/event11"),
+            )
+        )
+
+        val command = shell.launchedDaemons.single()
+        assertTrue(command.contains("--hide-node '/dev/input/event10'"))
+        assertTrue(command.contains("--hide-node '/dev/input/event11'"))
+    }
+
+    @Test
+    fun startOmitsHideNodeArgWhenNoNodesToHide() {
+        repository.start(
+            MirrorStartRequest(
+                source = "/dev/input/event9",
+                target = "/dev/input/event2",
+                homeAsBack = false,
+                comboHoldKillApp = false,
+            )
+        )
+
+        assertFalse(shell.launchedDaemons.single().contains("--hide-node"))
+    }
+
+    @Test
     fun startThrowsWhenLaunchCommandIsNotDelivered() {
         shell.deliver = false
 
