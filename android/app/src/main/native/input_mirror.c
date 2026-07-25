@@ -577,6 +577,269 @@ static void restore_from_state_file(const char *path) {
     unlink(path);
 }
 
+// All state carried across mirror-loop iterations: the fds, the option flags, and the runtime state
+// for the kill-app combo, the heartbeat, and virtual-mouse mode. Grouping it keeps the loop body a
+// readable dispatcher and lets each feature live in its own handler.
+struct mirror_state {
+    int source_fd;
+    int target_fd;
+    int uinput_fd;  // virtual-mouse pointer (created on entering mouse mode)
+    int touch_fd;   // cursor-hiding touch helper (created once per run)
+
+    const char *heartbeat_file_path;
+    int home_as_back;
+    int combo_hold_kill_app;
+    int virtual_mouse;
+    int swap_nintendo_layout;
+
+    // Select+Start "close app" combo.
+    int select_pressed;
+    int start_pressed;
+    int thumbr_pressed;
+    int combo_triggered;
+    long long combo_pressed_at_ms;
+
+    long long last_heartbeat_ms;
+
+    // Virtual-mouse runtime state.
+    int mouse_mode;
+    int mouse_combo_triggered;
+    long long mouse_combo_pressed_at_ms;
+    long long last_frame_ms;
+    double residual_x;  // carry sub-pixel cursor motion between frames
+    double residual_y;
+    double wheel_accum; // carry sub-click scroll between frames
+    int left_click_down;
+    int right_click_down;
+    int shade_open;     // our view of whether R1 last opened the notification shade
+    struct axis left_x, left_y, right_x, right_y;
+
+    // Everything the TARGET currently believes held/deflected, tracked as events are forwarded, so
+    // entering mouse mode can release all of it (see enter_mouse_mode).
+    unsigned char key_down[KEY_CNT];
+    int abs_present[ABS_CNT];
+    int abs_neutral[ABS_CNT];
+    int abs_last[ABS_CNT];
+};
+
+// Poll timeout for the next iteration: fast while a hold combo is pending (to catch the threshold
+// without new events) or in mouse mode (frame cadence), otherwise idle at 1s (heartbeat rate).
+static int compute_loop_timeout(const struct mirror_state *s) {
+    int timeout_ms = 1000;
+    if (s->mouse_mode) {
+        timeout_ms = (int)MOUSE_FRAME_INTERVAL_MS;
+    } else if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered) {
+        timeout_ms = 50;
+    }
+    if (s->virtual_mouse && s->select_pressed && s->thumbr_pressed && !s->mouse_combo_triggered && timeout_ms > 50) {
+        timeout_ms = 50;
+    }
+    return timeout_ms;
+}
+
+// Emit accumulated cursor/scroll motion on the frame cadence. A moving stick streams ABS events so
+// poll rarely times out; the time gate throttles the actual emit rate to ~83 Hz either way.
+static void emit_mouse_frame(struct mirror_state *s) {
+    long long tick = now_ms();
+    if (tick - s->last_frame_ms < MOUSE_FRAME_INTERVAL_MS) {
+        return;
+    }
+    s->last_frame_ms = tick;
+    s->residual_x += axis_normalised(&s->left_x) * MOUSE_SPEED;
+    s->residual_y += axis_normalised(&s->left_y) * MOUSE_SPEED;
+    int dx = (int)s->residual_x;
+    int dy = (int)s->residual_y;
+    s->residual_x -= dx;
+    s->residual_y -= dy;
+
+    // Scroll: right stick up scrolls up (positive wheel). Stick up reads negative, so invert Y.
+    s->wheel_accum += (-axis_normalised(&s->right_y)) * WHEEL_STEP_PER_FRAME;
+    int wheel = (int)s->wheel_accum;
+    s->wheel_accum -= wheel;
+
+    if (dx != 0 || dy != 0 || wheel != 0) {
+        if (dx != 0) emit_event(s->uinput_fd, EV_REL, REL_X, dx);
+        if (dy != 0) emit_event(s->uinput_fd, EV_REL, REL_Y, dy);
+        if (wheel != 0) emit_event(s->uinput_fd, EV_REL, REL_WHEEL, wheel);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+    }
+}
+
+// Enter mouse mode: create the pointer, then release everything the target believes held (every key
+// forwarded as down and every axis away from its rest value) so the game sees no stuck buttons or
+// deflected sticks while we stop forwarding. On creation failure, stay in gamepad mode.
+static void enter_mouse_mode(struct mirror_state *s) {
+    s->uinput_fd = create_uinput_mouse();
+    if (s->uinput_fd < 0) {
+        fprintf(stderr, "Virtual mouse: could not create uinput device; staying in gamepad mode\n");
+        return;
+    }
+    s->mouse_mode = 1;
+    for (int code = 0; code < KEY_CNT; code++) {
+        if (s->key_down[code]) {
+            emit_event(s->target_fd, EV_KEY, (unsigned short)code, 0);
+            s->key_down[code] = 0;
+        }
+    }
+    for (int code = 0; code < ABS_CNT; code++) {
+        if (s->abs_present[code] && s->abs_last[code] != s->abs_neutral[code]) {
+            emit_event(s->target_fd, EV_ABS, (unsigned short)code, s->abs_neutral[code]);
+            s->abs_last[code] = s->abs_neutral[code];
+        }
+    }
+    emit_event(s->target_fd, EV_SYN, SYN_REPORT, 0);
+    s->residual_x = s->residual_y = s->wheel_accum = 0.0;
+    s->left_click_down = s->right_click_down = 0;
+    s->shade_open = 0;
+    s->last_frame_ms = now_ms();
+}
+
+// Leave mouse mode: release held clicks, destroy the pointer (so Android drops the on-screen cursor)
+// and flush the touch helper to hide the cursor immediately instead of waiting for its fade.
+static void leave_mouse_mode(struct mirror_state *s) {
+    s->mouse_mode = 0;
+    if (s->uinput_fd >= 0) {
+        if (s->left_click_down) emit_event(s->uinput_fd, EV_KEY, BTN_LEFT, 0);
+        if (s->right_click_down) emit_event(s->uinput_fd, EV_KEY, BTN_RIGHT, 0);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+        ioctl(s->uinput_fd, UI_DEV_DESTROY);
+        close(s->uinput_fd);
+        s->uinput_fd = -1;
+    }
+    s->left_click_down = s->right_click_down = 0;
+    flush_touch_cancel(s->touch_fd);
+}
+
+// Flip mouse mode if Select+R3 has been held past the threshold. Checked every loop because the hold
+// may complete on a poll timeout with no new event.
+static void maybe_toggle_mouse_mode(struct mirror_state *s) {
+    if (!s->virtual_mouse || !s->select_pressed || !s->thumbr_pressed || s->mouse_combo_triggered ||
+        now_ms() - s->mouse_combo_pressed_at_ms < MOUSE_TOGGLE_HOLD_MS) {
+        return;
+    }
+    s->mouse_combo_triggered = 1;
+    if (!s->mouse_mode) {
+        enter_mouse_mode(s);
+    } else {
+        leave_mouse_mode(s);
+    }
+}
+
+// Fire the kill-app combo when it completes on a poll timeout (no new event to carry it over).
+static void maybe_kill_combo_on_timeout(struct mirror_state *s) {
+    if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered &&
+        now_ms() - s->combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS) {
+        force_stop_foreground_app();
+        s->combo_triggered = 1;
+    }
+}
+
+// Track Select/Start/R3 press state (read by both combos) and (re)arm the mouse-toggle hold. Only a
+// combo key's own press may (re)arm the timer, so another button pressed while both are held can't
+// reset an in-progress hold. Called for every EV_KEY event.
+static void update_combo_tracking(struct mirror_state *s, const struct input_event *ev) {
+    if (is_select_button(ev->code)) {
+        if (ev->value == 1) s->select_pressed = 1;
+        else if (ev->value == 0) s->select_pressed = 0;
+    } else if (is_start_button(ev->code)) {
+        if (ev->value == 1) s->start_pressed = 1;
+        else if (ev->value == 0) s->start_pressed = 0;
+    } else if (ev->code == BTN_THUMBR) {
+        if (ev->value == 1) s->thumbr_pressed = 1;
+        else if (ev->value == 0) s->thumbr_pressed = 0;
+    }
+
+    if (s->virtual_mouse) {
+        int is_mouse_combo_key = is_select_button(ev->code) || ev->code == BTN_THUMBR;
+        if (is_mouse_combo_key && ev->value == 1 && s->select_pressed && s->thumbr_pressed) {
+            s->mouse_combo_pressed_at_ms = now_ms();
+            s->mouse_combo_triggered = 0;
+        }
+        if (ev->value == 0 && (!s->select_pressed || !s->thumbr_pressed)) {
+            s->mouse_combo_triggered = 0;
+        }
+    }
+}
+
+// Home-as-Back: swallow the Home button entirely (press, repeat and release) so the target never
+// sees a Home-down without its up, and inject Back once, on release. Returns 1 if the event was
+// consumed (must not be forwarded).
+static int handle_home_as_back(const struct mirror_state *s, const struct input_event *ev) {
+    if (!s->home_as_back || ev->type != EV_KEY || !is_home_button(ev->code)) {
+        return 0;
+    }
+    if (ev->value == 0) {
+        run_detached("input keyevent 4");
+    }
+    return 1;
+}
+
+// Advance the Select+Start "close app" combo on a Select/Start event.
+static void handle_kill_combo_event(struct mirror_state *s, const struct input_event *ev) {
+    if (!s->combo_hold_kill_app || ev->type != EV_KEY ||
+        !(is_select_button(ev->code) || is_start_button(ev->code))) {
+        return;
+    }
+    if (ev->value == 1 && s->select_pressed && s->start_pressed) {
+        s->combo_pressed_at_ms = now_ms();
+        s->combo_triggered = 0;
+    }
+    if ((ev->value == 2 || ev->value == 0) && s->select_pressed && s->start_pressed &&
+        !s->combo_triggered && now_ms() - s->combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS) {
+        force_stop_foreground_app();
+        s->combo_triggered = 1;
+    }
+    if (ev->value == 0 && !s->select_pressed && !s->start_pressed) {
+        s->combo_triggered = 0;
+        s->combo_pressed_at_ms = 0;
+    }
+}
+
+// In mouse mode the source drives the pointer instead of the target: track stick positions (motion
+// is emitted on the frame cadence), map A/B to clicks, and R1 to the notification shade.
+static void handle_mouse_event(struct mirror_state *s, const struct input_event *ev) {
+    if (ev->type == EV_ABS) {
+        if (ev->code == s->left_x.code && s->left_x.present) s->left_x.raw = ev->value;
+        else if (ev->code == s->left_y.code && s->left_y.present) s->left_y.raw = ev->value;
+        else if (ev->code == s->right_x.code && s->right_x.present) s->right_x.raw = ev->value;
+        else if (ev->code == s->right_y.code && s->right_y.present) s->right_y.raw = ev->value;
+    } else if (ev->type == EV_KEY && ev->code == BTN_SOUTH) {
+        s->left_click_down = ev->value ? 1 : 0;
+        emit_event(s->uinput_fd, EV_KEY, BTN_LEFT, s->left_click_down);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+    } else if (ev->type == EV_KEY && ev->code == BTN_EAST) {
+        s->right_click_down = ev->value ? 1 : 0;
+        emit_event(s->uinput_fd, EV_KEY, BTN_RIGHT, s->right_click_down);
+        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
+    } else if (ev->type == EV_KEY && ev->code == BTN_TR && ev->value == 1) {
+        // R1 toggles Android's notification shade (a mouse can't drag it down). Commands are
+        // idempotent enough that a stale shade_open just costs one extra press.
+        if (s->shade_open) {
+            run_detached("cmd statusbar collapse");
+            s->shade_open = 0;
+        } else {
+            run_detached("cmd statusbar expand-notifications");
+            s->shade_open = 1;
+        }
+    }
+}
+
+// Forward one event to the target: apply the Nintendo face-button swap, record what the target now
+// believes held/deflected (for mouse-mode entry), and write it tolerantly. Returns 0, or -1 if the
+// target write kept failing.
+static int forward_event(struct mirror_state *s, struct input_event *ev) {
+    if (s->swap_nintendo_layout && ev->type == EV_KEY) {
+        ev->code = swap_nintendo_face_button(ev->code);
+    }
+    // Post-swap: this is what the TARGET believes.
+    if (ev->type == EV_KEY && ev->code < KEY_CNT) {
+        s->key_down[ev->code] = ev->value != 0;
+    } else if (ev->type == EV_ABS && ev->code < ABS_CNT) {
+        s->abs_last[ev->code] = ev->value;
+    }
+    return write_event_tolerant(s->target_fd, ev);
+}
+
 int main(int argc, char **argv) {
     // Heal mode (no mirroring): restore nodes a crashed session left hidden, then exit. Invoked as
     // `input_mirror --heal --hidden-state-file PATH`. Detected up front so the source/target
@@ -663,67 +926,54 @@ int main(int argc, char **argv) {
     // Auto-reap the short-lived children spawned by run_detached so they never linger as zombies.
     signal(SIGCHLD, SIG_IGN);
 
-    int source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
-    if (source_fd < 0) {
+    struct mirror_state s;
+    memset(&s, 0, sizeof(s));
+    s.uinput_fd = -1;
+    s.touch_fd = -1;
+    s.heartbeat_file_path = heartbeat_file_path;
+    s.home_as_back = home_as_back;
+    s.combo_hold_kill_app = combo_hold_kill_app;
+    s.virtual_mouse = virtual_mouse;
+    s.last_frame_ms = now_ms();
+
+    s.source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
+    if (s.source_fd < 0) {
         fprintf(stderr, "Failed to open source %s: %s\n", source_path, strerror(errno));
         return EXIT_FAILURE;
     }
 
-    int target_fd = open(target_path, O_RDWR | O_CLOEXEC);
-    if (target_fd < 0) {
+    s.target_fd = open(target_path, O_RDWR | O_CLOEXEC);
+    if (s.target_fd < 0) {
         fprintf(stderr, "Failed to open target %s: %s\n", target_path, strerror(errno));
-        close(source_fd);
+        close(s.source_fd);
         return EXIT_FAILURE;
     }
 
-    int swap_nintendo_layout = 0;
     struct input_id target_id;
-    if (ioctl(target_fd, EVIOCGID, &target_id) == 0) {
-        swap_nintendo_layout =
+    if (ioctl(s.target_fd, EVIOCGID, &target_id) == 0) {
+        s.swap_nintendo_layout =
             target_id.vendor == ODIN_VENDOR_ID &&
             target_id.product == ODIN_NINTENDO_PRODUCT_ID;
     }
 
     // Virtual mouse setup: resolve which axes to read. Left stick (ABS_X/ABS_Y) is universal; the
     // right stick used for scroll varies, so probe ABS_RX/RY and fall back to ABS_Z/RZ (e.g. 8BitDo
-    // exposes the right stick as ABS_Z/ABS_RZ). The uinput pointer itself is created on demand when
-    // entering mouse mode and destroyed on leaving, so Android drops the on-screen cursor as soon as
-    // mouse mode is turned off (a still-connected mouse keeps the pointer visible in dock mode).
-    int uinput_fd = -1;
-    int touch_fd = -1;
-    struct axis left_x, left_y, right_x, right_y;
-    memset(&left_x, 0, sizeof(left_x));
-    memset(&left_y, 0, sizeof(left_y));
-    memset(&right_x, 0, sizeof(right_x));
-    memset(&right_y, 0, sizeof(right_y));
-
-    // Everything the target currently believes held/deflected, tracked as events are forwarded.
-    // Entering mouse mode releases ALL of it — not just the toggle-combo keys — so a button or
-    // trigger held at entry can't stay stuck on the target for the whole mouse session. Axis
-    // "neutral" is the value sampled at startup (controller assumed at rest): stick center, or a
-    // trigger's minimum — a computed midpoint would half-press a trigger.
-    unsigned char key_down[KEY_CNT];
-    int abs_present[ABS_CNT];
-    int abs_neutral[ABS_CNT];
-    int abs_last[ABS_CNT];
-    memset(key_down, 0, sizeof(key_down));
-    memset(abs_present, 0, sizeof(abs_present));
-    memset(abs_neutral, 0, sizeof(abs_neutral));
-    memset(abs_last, 0, sizeof(abs_last));
-
+    // exposes the right stick as ABS_Z/ABS_RZ). The abs_* arrays capture the source's rest state so
+    // entering mouse mode can neutralise a held trigger/stick (enter_mouse_mode): a trigger's rest
+    // value is its minimum, so a sampled-at-startup neutral avoids half-pressing it.
     if (virtual_mouse) {
-        query_axis(source_fd, &left_x, ABS_X);
-        query_axis(source_fd, &left_y, ABS_Y);
-        query_axis(source_fd, &right_x, ABS_RX);
-        query_axis(source_fd, &right_y, ABS_RY);
-        if (!right_x.present || !right_y.present) {
-            query_axis(source_fd, &right_x, ABS_Z);
-            query_axis(source_fd, &right_y, ABS_RZ);
+        query_axis(s.source_fd, &s.left_x, ABS_X);
+        query_axis(s.source_fd, &s.left_y, ABS_Y);
+        query_axis(s.source_fd, &s.right_x, ABS_RX);
+        query_axis(s.source_fd, &s.right_y, ABS_RY);
+        if (!s.right_x.present || !s.right_y.present) {
+            query_axis(s.source_fd, &s.right_x, ABS_Z);
+            query_axis(s.source_fd, &s.right_y, ABS_RZ);
         }
 
         unsigned long abs_bits[(ABS_CNT + 8 * sizeof(unsigned long) - 1) / (8 * sizeof(unsigned long))];
         memset(abs_bits, 0, sizeof(abs_bits));
-        if (ioctl(source_fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) >= 0) {
+        if (ioctl(s.source_fd, EVIOCGBIT(EV_ABS, sizeof(abs_bits)), abs_bits) >= 0) {
             for (int code = 0; code < ABS_CNT; code++) {
                 size_t word = (size_t)code / (8 * sizeof(unsigned long));
                 unsigned long bit = 1UL << ((size_t)code % (8 * sizeof(unsigned long)));
@@ -731,10 +981,10 @@ int main(int argc, char **argv) {
                     continue;
                 }
                 struct input_absinfo info;
-                if (ioctl(source_fd, EVIOCGABS(code), &info) == 0) {
-                    abs_present[code] = 1;
-                    abs_neutral[code] = info.value;
-                    abs_last[code] = info.value;
+                if (ioctl(s.source_fd, EVIOCGABS(code), &info) == 0) {
+                    s.abs_present[code] = 1;
+                    s.abs_neutral[code] = info.value;
+                    s.abs_last[code] = info.value;
                 }
             }
         }
@@ -744,16 +994,16 @@ int main(int argc, char **argv) {
     // what hides the cursor on mouse-mode exit when enabled, and its unavoidable "connected" toast
     // ("Docking Enhancer Mirror connected") doubles as a consistent mirror-activation notification on
     // each start. Created once and kept for the whole session so the toast doesn't repeat per toggle.
-    touch_fd = create_touch_device();
+    s.touch_fd = create_touch_device();
 
-    if (ioctl(source_fd, EVIOCGRAB, 1) < 0) {
+    if (ioctl(s.source_fd, EVIOCGRAB, 1) < 0) {
         fprintf(stderr, "Failed to grab source %s: %s\n", source_path, strerror(errno));
-        if (touch_fd >= 0) {
-            ioctl(touch_fd, UI_DEV_DESTROY);
-            close(touch_fd);
+        if (s.touch_fd >= 0) {
+            ioctl(s.touch_fd, UI_DEV_DESTROY);
+            close(s.touch_fd);
         }
-        close(target_fd);
-        close(source_fd);
+        close(s.target_fd);
+        close(s.source_fd);
         return EXIT_FAILURE;
     }
 
@@ -774,83 +1024,21 @@ int main(int argc, char **argv) {
     }
     write_hidden_state(hidden_state_path, hidden, hide_count);
 
-    struct input_event event;
-    int select_pressed = 0;
-    int start_pressed = 0;
-    int thumbr_pressed = 0;
-
-    int combo_triggered = 0;
-    long long combo_pressed_at_ms = 0;
-    long long last_heartbeat_ms = 0;
-
-    // Virtual mouse runtime state.
-    int mouse_mode = 0;
-    int mouse_combo_triggered = 0;
-    long long mouse_combo_pressed_at_ms = 0;
-    long long last_frame_ms = now_ms();
-    double residual_x = 0.0; // carry sub-pixel cursor motion between frames
-    double residual_y = 0.0;
-    double wheel_accum = 0.0; // carry sub-click scroll between frames
-    int left_click_down = 0;
-    int right_click_down = 0;
-    int shade_open = 0; // our view of whether R1 last opened the notification shade
-
     while (keep_running) {
-        int timeout_ms = 1000;
-        if (mouse_mode) {
-            timeout_ms = (int)MOUSE_FRAME_INTERVAL_MS;
-        } else if (
-            combo_hold_kill_app &&
-            select_pressed &&
-            start_pressed &&
-            !combo_triggered
-        ) {
-            timeout_ms = 50;
-        }
-        // A pending mouse-toggle hold needs a short timeout to catch the threshold without new events.
-        if (virtual_mouse && select_pressed && thumbr_pressed && !mouse_combo_triggered && timeout_ms > 50) {
-            timeout_ms = 50;
-        }
+        int timeout_ms = compute_loop_timeout(&s);
 
         long long heartbeat_now_ms = now_ms();
-        if (heartbeat_now_ms - last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
-            write_heartbeat_file(heartbeat_file_path);
-            last_heartbeat_ms = heartbeat_now_ms;
+        if (heartbeat_now_ms - s.last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
+            write_heartbeat_file(s.heartbeat_file_path);
+            s.last_heartbeat_ms = heartbeat_now_ms;
         }
 
-        // Emit accumulated cursor/scroll motion on the frame cadence. Done at the top of the loop
-        // (not only on poll timeout) because a moving stick streams ABS events, so poll rarely
-        // times out; the time gate throttles the actual emit rate to ~83 Hz either way.
-        if (mouse_mode) {
-            long long tick = now_ms();
-            if (tick - last_frame_ms >= MOUSE_FRAME_INTERVAL_MS) {
-                last_frame_ms = tick;
-                double nx = axis_normalised(&left_x);
-                double ny = axis_normalised(&left_y);
-                residual_x += nx * MOUSE_SPEED;
-                residual_y += ny * MOUSE_SPEED;
-                int dx = (int)residual_x;
-                int dy = (int)residual_y;
-                residual_x -= dx;
-                residual_y -= dy;
-
-                // Scroll: right stick up scrolls up (positive wheel). Stick up reads negative, so
-                // invert the Y deflection.
-                wheel_accum += (-axis_normalised(&right_y)) * WHEEL_STEP_PER_FRAME;
-                int wheel = (int)wheel_accum;
-                wheel_accum -= wheel;
-
-                if (dx != 0 || dy != 0 || wheel != 0) {
-                    if (dx != 0) emit_event(uinput_fd, EV_REL, REL_X, dx);
-                    if (dy != 0) emit_event(uinput_fd, EV_REL, REL_Y, dy);
-                    if (wheel != 0) emit_event(uinput_fd, EV_REL, REL_WHEEL, wheel);
-                    emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
-                }
-            }
+        if (s.mouse_mode) {
+            emit_mouse_frame(&s);
         }
 
         struct pollfd source_poll;
-        source_poll.fd = source_fd;
+        source_poll.fd = s.source_fd;
         source_poll.events = POLLIN;
         source_poll.revents = 0;
 
@@ -863,84 +1051,19 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // Fire the mouse toggle from a timeout too (the hold may complete with no new events).
-        if (
-            virtual_mouse &&
-            select_pressed &&
-            thumbr_pressed &&
-            !mouse_combo_triggered &&
-            now_ms() - mouse_combo_pressed_at_ms >= MOUSE_TOGGLE_HOLD_MS
-        ) {
-            mouse_combo_triggered = 1;
-            if (!mouse_mode) {
-                // Entering mouse mode: create the pointer now so Android shows a cursor, then
-                // neutralise everything we hold on the target so the game sees no stuck combo
-                // buttons or deflected sticks while we stop forwarding. If creation fails, stay in
-                // gamepad mode.
-                uinput_fd = create_uinput_mouse();
-                if (uinput_fd < 0) {
-                    fprintf(stderr, "Virtual mouse: could not create uinput device; staying in gamepad mode\n");
-                } else {
-                    mouse_mode = 1;
-                    // Release everything the target believes held: every key we forwarded as down
-                    // and every axis away from its rest value (sticks AND triggers/dpad hats).
-                    for (int code = 0; code < KEY_CNT; code++) {
-                        if (key_down[code]) {
-                            emit_event(target_fd, EV_KEY, (unsigned short)code, 0);
-                            key_down[code] = 0;
-                        }
-                    }
-                    for (int code = 0; code < ABS_CNT; code++) {
-                        if (abs_present[code] && abs_last[code] != abs_neutral[code]) {
-                            emit_event(target_fd, EV_ABS, (unsigned short)code, abs_neutral[code]);
-                            abs_last[code] = abs_neutral[code];
-                        }
-                    }
-                    emit_event(target_fd, EV_SYN, SYN_REPORT, 0);
-                    residual_x = residual_y = wheel_accum = 0.0;
-                    left_click_down = right_click_down = 0;
-                    shade_open = 0;
-                    last_frame_ms = now_ms();
-                }
-            } else {
-                // Leaving mouse mode: release any held clicks, then destroy the pointer so Android
-                // removes the on-screen cursor (a still-connected mouse would keep it visible).
-                mouse_mode = 0;
-                if (uinput_fd >= 0) {
-                    if (left_click_down) emit_event(uinput_fd, EV_KEY, BTN_LEFT, 0);
-                    if (right_click_down) emit_event(uinput_fd, EV_KEY, BTN_RIGHT, 0);
-                    emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
-                    ioctl(uinput_fd, UI_DEV_DESTROY);
-                    close(uinput_fd);
-                    uinput_fd = -1;
-                }
-                left_click_down = right_click_down = 0;
-                // Force the cursor off the screen immediately (switch Android to touch mode) instead
-                // of waiting for its inactivity fade. The persistent touch device is kept alive so it
-                // doesn't re-announce itself; the gesture is cancelled rather than destroyed.
-                flush_touch_cancel(touch_fd);
-            }
-        }
+        // The mouse toggle may complete on a poll timeout with no new event, so check it every loop.
+        maybe_toggle_mouse_mode(&s);
 
         if (poll_result == 0) {
-            if (
-                combo_hold_kill_app &&
-                select_pressed &&
-                start_pressed &&
-                !combo_triggered &&
-                now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
-            ) {
-                force_stop_foreground_app();
-                combo_triggered = 1;
-            }
+            maybe_kill_combo_on_timeout(&s);
             continue;
         }
 
-        ssize_t bytes_read = read(source_fd, &event, sizeof(event));
+        struct input_event event;
+        ssize_t bytes_read = read(s.source_fd, &event, sizeof(event));
         if (bytes_read == 0) {
             break;
         }
-
         if (bytes_read < 0) {
             if (errno == EINTR) {
                 continue;
@@ -948,117 +1071,28 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Read error from %s: %s\n", source_path, strerror(errno));
             break;
         }
-
         if ((size_t)bytes_read != sizeof(event)) {
             fprintf(stderr, "Short read from %s: %zd bytes\n", source_path, bytes_read);
             continue;
         }
 
-        // Track the combo button states unconditionally so both the kill-app and mouse-toggle
-        // combos can read them regardless of which feature is enabled.
+        // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
         if (event.type == EV_KEY) {
-            if (is_select_button(event.code)) {
-                if (event.value == 1) select_pressed = 1;
-                else if (event.value == 0) select_pressed = 0;
-            } else if (is_start_button(event.code)) {
-                if (event.value == 1) start_pressed = 1;
-                else if (event.value == 0) start_pressed = 0;
-            } else if (event.code == BTN_THUMBR) {
-                if (event.value == 1) thumbr_pressed = 1;
-                else if (event.value == 0) thumbr_pressed = 0;
-            }
-
-            // Arm the mouse-toggle hold when Select+R3 first go down together; disarm on release.
-            // Only a combo key's own press may (re)arm the timer — any other button pressed while
-            // both are held must not reset an in-progress hold.
-            if (virtual_mouse) {
-                int is_mouse_combo_key = is_select_button(event.code) || event.code == BTN_THUMBR;
-                if (is_mouse_combo_key && event.value == 1 && select_pressed && thumbr_pressed) {
-                    mouse_combo_pressed_at_ms = now_ms();
-                    mouse_combo_triggered = 0;
-                }
-                if (event.value == 0 && (!select_pressed || !thumbr_pressed)) {
-                    mouse_combo_triggered = 0;
-                }
-            }
+            update_combo_tracking(&s, &event);
         }
 
-        if (home_as_back && event.type == EV_KEY && is_home_button(event.code)) {
-            // Swallow the Home button entirely (press, repeat and release) so the target controller
-            // never sees a Home-down that never gets its matching up. Inject Back once, on release.
-            if (event.value == 0) {
-                run_detached("input keyevent 4");
-            }
+        if (handle_home_as_back(&s, &event)) {
             continue;
         }
 
-        if (combo_hold_kill_app && event.type == EV_KEY && (is_select_button(event.code) || is_start_button(event.code))) {
-            if (event.value == 1) {
-                if (select_pressed && start_pressed) {
-                    combo_pressed_at_ms = now_ms();
-                    combo_triggered = 0;
-                }
-            }
+        handle_kill_combo_event(&s, &event);
 
-            if (
-                (event.value == 2 || event.value == 0) &&
-                select_pressed &&
-                start_pressed &&
-                !combo_triggered &&
-                now_ms() - combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS
-            ) {
-                force_stop_foreground_app();
-                combo_triggered = 1;
-            }
-
-            if (event.value == 0 && !select_pressed && !start_pressed) {
-                combo_triggered = 0;
-                combo_pressed_at_ms = 0;
-            }
-        }
-
-        // In mouse mode the source drives the pointer instead of the target: update stick positions
-        // (motion is emitted on the frame cadence above) and map A/B to clicks.
-        if (mouse_mode) {
-            if (event.type == EV_ABS) {
-                if (event.code == left_x.code && left_x.present) left_x.raw = event.value;
-                else if (event.code == left_y.code && left_y.present) left_y.raw = event.value;
-                else if (event.code == right_x.code && right_x.present) right_x.raw = event.value;
-                else if (event.code == right_y.code && right_y.present) right_y.raw = event.value;
-            } else if (event.type == EV_KEY && event.code == BTN_SOUTH) {
-                left_click_down = event.value ? 1 : 0;
-                emit_event(uinput_fd, EV_KEY, BTN_LEFT, left_click_down);
-                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
-            } else if (event.type == EV_KEY && event.code == BTN_EAST) {
-                right_click_down = event.value ? 1 : 0;
-                emit_event(uinput_fd, EV_KEY, BTN_RIGHT, right_click_down);
-                emit_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
-            } else if (event.type == EV_KEY && event.code == BTN_TR && event.value == 1) {
-                // R1 toggles Android's notification shade (a mouse can't drag it down). Commands are
-                // idempotent enough that a stale shade_open just costs one extra press.
-                if (shade_open) {
-                    run_detached("cmd statusbar collapse");
-                    shade_open = 0;
-                } else {
-                    run_detached("cmd statusbar expand-notifications");
-                    shade_open = 1;
-                }
-            }
+        if (s.mouse_mode) {
+            handle_mouse_event(&s, &event);
             continue;
         }
 
-        if (swap_nintendo_layout && event.type == EV_KEY) {
-            event.code = swap_nintendo_face_button(event.code);
-        }
-
-        // Track forwarded state (post-swap: what the TARGET believes) for mouse-mode entry.
-        if (event.type == EV_KEY && event.code < KEY_CNT) {
-            key_down[event.code] = event.value != 0;
-        } else if (event.type == EV_ABS && event.code < ABS_CNT) {
-            abs_last[event.code] = event.value;
-        }
-
-        if (write_event_tolerant(target_fd, &event) != 0) {
+        if (forward_event(&s, &event) != 0) {
             fprintf(stderr, "Write error to %s: %s\n", target_path, strerror(errno));
             break;
         }
@@ -1072,20 +1106,20 @@ int main(int argc, char **argv) {
         unlink(hidden_state_path);
     }
 
-    if (ioctl(source_fd, EVIOCGRAB, 0) < 0) {
+    if (ioctl(s.source_fd, EVIOCGRAB, 0) < 0) {
         fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
 
-    if (uinput_fd >= 0) {
-        ioctl(uinput_fd, UI_DEV_DESTROY);
-        close(uinput_fd);
+    if (s.uinput_fd >= 0) {
+        ioctl(s.uinput_fd, UI_DEV_DESTROY);
+        close(s.uinput_fd);
     }
-    if (touch_fd >= 0) {
-        ioctl(touch_fd, UI_DEV_DESTROY);
-        close(touch_fd);
+    if (s.touch_fd >= 0) {
+        ioctl(s.touch_fd, UI_DEV_DESTROY);
+        close(s.touch_fd);
     }
-    close(target_fd);
-    close(source_fd);
+    close(s.target_fd);
+    close(s.source_fd);
     if (pid_file_path != NULL) {
         unlink(pid_file_path);
     }
