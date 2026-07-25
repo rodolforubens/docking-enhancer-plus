@@ -45,17 +45,17 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Local agent skills/config. Personal settings and third-party skills stay out of the repo; the
-# project's own e2e suite is tracked, because it is test code for this product rather than
-# reinstallable tooling. Written as .claude/* (not .claude/) since git cannot re-include anything
-# under an excluded directory.
+# Local agent skills/config. Personal settings stay out, and so do the third-party skills
+# themselves — `skills-lock.json` is tracked instead, so a collaborator reproduces the same tooling
+# with `npx skills` rather than us vendoring (and re-licensing) someone else's work. The project's
+# own e2e suite IS tracked: it is test code for this product, not reinstallable tooling. Written as
+# .claude/* (not .claude/) since git cannot re-include anything under an excluded directory.
 .agents/
 .claude/*
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/mirror-e2e/
 .claude/skills/mirror-e2e/build/
-skills-lock.json
 
 # Temporary files
 tmp/

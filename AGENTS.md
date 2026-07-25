@@ -40,4 +40,9 @@
 - Fallback: `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`, then launch `com.odininputmirror/.MainActivity`.
 
 ## Agent-local files
-- `.agents/` and `skills-lock.json` are intentionally gitignored; do not re-add them to tracking.
+- `.agents/` is intentionally gitignored; do not re-add it to tracking.
+- Third-party skills under `.claude/skills/` stay untracked, but `skills-lock.json` IS tracked so a
+  collaborator can reproduce the same tooling with `npx skills` — vendoring the skills themselves
+  would mean redistributing other authors' work under this repo's licence.
+- `.claude/skills/mirror-e2e/` is the exception and is tracked: it is this project's own e2e suite
+  (see its `SKILL.md`), not reinstallable tooling. Its `build/` output stays ignored.
