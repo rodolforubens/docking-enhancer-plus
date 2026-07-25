@@ -72,20 +72,51 @@ missing SELinux label, which is invisible to `ls`.
   synthetic burst must alternate values or it arrives half empty.
 - **A physical pad sleeps mid-run.** The reason the suite uses synthetic devices at all.
 
-## Not covered — verify by hand
+## Manual checklist — the app layer
 
-The suite deliberately stops at the daemon boundary. These still need a person:
+The suite stops at the daemon boundary; the supervisor, the UI and the physical pad need a person.
+Run these against a debug build with `FORCE_DOCK_MODE_FOR_DEV = true` (and set it back before
+committing). Watch the system side with `pidof input_mirror`, `dumpsys input | grep -i 8bitdo`, and
+`run-as com.odininputmirror cat files/input_mirror.hidden`.
 
-- **App/supervisor flows**: dock gating, auto-start on connect, restart after a toggle change,
-  settings persistence. Drive the real app and read `dumpsys input` / the notification state.
-- **Anything visual**: that the mouse cursor actually *appears*, that the UI reads correctly.
-- **The physical pad's own behaviour**: combos (Select+Start, Select+R3) and Home-as-Back need real
-  presses on a real controller.
+1. **Auto-start** — with Automatic Mirror on, wake the pad. The mirror should start on its own, hide
+   the pad, and beat its heartbeat.
+2. **Rapid toggling** — hammer the three switches out of order for ~45s, then stop and leave the app
+   alone. See the settled behaviour below for what "correct" looks like.
+3. **Mouse mode** — Select+R3. The cursor must appear *without* moving the stick, then respond to
+   both sticks, A/B clicks and the R1 shade toggle.
+4. **Internal picker** — turn Automatic Mirror off, tap the Local Controller card. The pad currently
+   acting as external must not be listed.
+5. **Combos** — Select+Start for 3s force-stops the foreground app; Home acts as Back.
+6. **Disconnect / reconnect** — power the pad off, wait, power it on. The daemon must exit restoring
+   the node and clearing the state file, and a fresh mirror must start once the pad is back.
+
+### Settled behaviour worth knowing (measured, not assumed)
+
+- **Restarts flash the pad visible for ~0.5–1s.** Every settings change restarts the daemon, and
+  `EVIOCGRAB` is exclusive, so the old one must release before the new one grabs. A game open at that
+  moment can briefly see two controllers. Inherent to the design, not a defect — the alternative is
+  risking a node that never comes back.
+- **Rapid toggling never stranded the pad.** Five restarts in 45s of hammering, and the dangerous
+  state — hidden with no daemon running — did not occur once: each daemon restores before dying and
+  the next one re-hides.
+- **The 10s restart throttle is what keeps that sane**, holding five restarts instead of dozens.
+  Flags read stale while a change waits out the throttle; they converge within one window (verified
+  over 9 consecutive samples) once the toggling stops.
+- **Reconnect takes ~5s** after the pad reappears — the supervisor's waiting-for-device poll.
+
+## Still unverified
+
 - **`link()` failing during restore.** The recovery path exists but cannot be forced without
-  sabotaging the filesystem; it is covered by inspection, not by test.
+  sabotaging the filesystem; covered by inspection, not by test.
+- **Reconnect that renumbers.** Every observed reconnect reused the same `eventN` and device numbers,
+  so the path where a pad returns under a *different* node has only been exercised synthetically
+  (T5's identity check), never end to end.
+- **A real dock.** All app-layer testing has gone through `FORCE_DOCK_MODE_FOR_DEV`, never an actual
+  external display.
 
-There is no CI story: every test needs the handheld attached. That is a property of the product, not
-a gap in the suite.
+There is no CI story: every test here needs the handheld attached. That is a property of the
+product, not a gap in the suite.
 
 ## Adding a test
 
