@@ -110,7 +110,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
             autoLocal != null && savedIdentityMatches(status.source, status.sourceGuid, autoLocal)
 
         val localDevice = autoLocal
-            ?: deviceFromSavedIdentity(status.target, status.targetGuid, available, "Saved Odin controller")
+            ?: deviceFromSavedIdentity(status.target, status.targetGuid, available, "Saved built-in controller")
         val externalDevice = autoExternal
             ?: if (savedExternalIsLocal) {
                 null
@@ -234,7 +234,7 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private fun buildStatusMessage(status: MirrorStatus, devices: List<ControllerDevice>): String = when {
         status.running -> "Dock mirror active."
         !status.autoMirrorEnabled -> "Automatic dock mirror is disabled."
-        devices.none { it.isInternal } -> "Waiting for Odin internal controller."
+        devices.none { it.isInternal } -> "Waiting for the built-in controller."
         devices.none { !it.isInternal } -> "Waiting for an external controller."
         status.expectedRunning -> "Controller detected. Mirror will start automatically."
         else -> "Automatic dock mirror is ready."

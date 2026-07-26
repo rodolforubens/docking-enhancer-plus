@@ -124,9 +124,11 @@ A third closed itself by accident: the suite SIGKILLs any live mirror at setup, 
 real pad's node. The state file kept the record and the supervisor healed it unprompted, exercising
 T3's path against real hardware rather than a synthetic pad.
 
+A fourth needed no rig at all: installing on an ordinary phone shows the unsupported notice, so the
+`PServerBinder` gate is confirmed to turn a non-handheld away instead of half-running.
+
 What is left is untestable here rather than unverified: a failing `link()` (unforceable without
-sabotaging the filesystem), a device without `PServerBinder` (needs different hardware), and two
-external pads at once.
+sabotaging the filesystem) and two external pads at once.
 
 ### Testing against a real dock
 

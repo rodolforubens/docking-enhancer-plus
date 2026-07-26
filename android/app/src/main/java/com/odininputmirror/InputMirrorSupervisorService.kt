@@ -250,7 +250,9 @@ class InputMirrorSupervisorService : Service() {
     private enum class SupervisorState(val notificationText: String) {
         WaitingForDock("Waiting for external display"),
         Disabled("Automatic mirror disabled"),
-        WaitingForInternalController("Waiting for Odin controller"),
+        // Device-neutral wording: support is gated on the PServerBinder service existing, not on a
+        // model list, so naming one handheld here would be wrong on any other that qualifies.
+        WaitingForInternalController("Waiting for built-in controller"),
         WaitingForExternalController("Waiting for external controller"),
         Starting("Starting dock mirror"),
         Active("Dock mirror active"),

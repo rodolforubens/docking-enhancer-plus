@@ -17,12 +17,12 @@
 
 ## Overview
 
-On handhelds like the **AYN Odin family**, docking to a TV is great — until you realize games and the system still expect the _built-in_ controller, not the pad in your hands. **Docking Enhancer** fixes that: it grabs an external controller — Bluetooth or wired — and replays its input onto the internal controller's input device, so everything sees your external pad as the one that's always been there.
+On handhelds like the **AYN Odin 2 family**, docking to a TV is great — until you realize games and the system still expect the _built-in_ controller, not the pad in your hands. **Docking Enhancer** fixes that: it grabs an external controller — Bluetooth or wired — and replays its input onto the internal controller's input device, so everything sees your external pad as the one that's always been there.
 
 It runs a small native daemon that reads the external controller and writes into the internal controller's evdev node, and it does it **without root** — driving the stock firmware's built-in `PServerBinder` service instead of `su`.
 
 > [!IMPORTANT]
-> This app only works on devices that ship the `PServerBinder` service (AYN Odin and similar handhelds). On any other device it detects the missing service and shows an **"Unsupported device"** notice instead of running.
+> This app only works on devices that ship the `PServerBinder` service (the AYN Odin 2 family and similar handhelds). On any other device it detects the missing service and shows an **"Unsupported device"** notice instead of running — verified on an ordinary phone, which is turned away rather than left misbehaving.
 
 ## Features
 

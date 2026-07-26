@@ -285,8 +285,8 @@ private fun UnsupportedDeviceDialog() {
             Text("Unsupported device", color = Palette.danger, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.height(12.dp))
             Text(
-                "This app needs the built-in PServer service that ships on handhelds like the AYN Odin. " +
-                    "Your device doesn't have it, so the dock mirror can't run here.",
+                "This app needs the built-in PServer service that ships on handhelds like the AYN Odin 2 " +
+                    "family. Your device doesn't have it, so the dock mirror can't run here.",
                 color = Palette.textSecondary,
                 fontSize = 14.sp,
             )
