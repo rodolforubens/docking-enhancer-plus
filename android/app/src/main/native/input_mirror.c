@@ -1235,6 +1235,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
 
+    // Shut mouse mode down the same way the user's own toggle does. Destroying the pointer device
+    // is not enough on its own: Android goes on drawing the cursor until it fades, so stopping the
+    // mirror from within mouse mode used to strand it on screen. leave_mouse_mode also flushes the
+    // touch helper, which is what actually takes it away — hence this runs while touch_fd is still
+    // alive, and before the plain destroy below (which is then a no-op).
+    if (s.mouse_mode) {
+        leave_mouse_mode(&s);
+    }
     if (s.uinput_fd >= 0) {
         ioctl(s.uinput_fd, UI_DEV_DESTROY);
         close(s.uinput_fd);
