@@ -241,7 +241,7 @@ class InputMirrorSupervisorService : Service() {
         return builder
             .setContentTitle("Docking Enhancer")
             .setContentText(state.notificationText)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_mirror)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .build()
