@@ -2,6 +2,12 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- The supervisor's foreground-service notification is the only place its state is reported.
+         This handheld's firmware posts it without the permission, but stock Android 13+ blocks
+         notifications outright for a target-33+ app that never declares it, so a stricter device
+         would hide the status entirely. Declared (and requested at launch) so the app does not
+         depend on one vendor's leniency. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".MainApplication"

@@ -1,5 +1,8 @@
 package com.odininputmirror
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -10,6 +13,7 @@ import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.odininputmirror.ui.MirrorScreen
 import com.odininputmirror.ui.MirrorViewModel
@@ -47,14 +51,32 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Asked for once, never insisted on. A denial costs the status notification and nothing else —
+    // the supervisor and the mirror run either way — so there is no prompt to re-raise and no
+    // reason to block the UI on the answer.
+    private val requestNotificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionIfNeeded()
         setContent {
             DockingEnhancerTheme {
                 val vm: MirrorViewModel = viewModel(factory = MirrorViewModel.factory(applicationContext))
                 MirrorScreen(viewModel = vm)
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
