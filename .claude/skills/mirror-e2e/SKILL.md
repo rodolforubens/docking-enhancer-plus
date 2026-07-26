@@ -112,8 +112,37 @@ committing). Watch the system side with `pidof input_mirror`, `dumpsys input | g
 - **Reconnect that renumbers.** Every observed reconnect reused the same `eventN` and device numbers,
   so the path where a pad returns under a *different* node has only been exercised synthetically
   (T5's identity check), never end to end.
-- **A real dock.** All app-layer testing has gone through `FORCE_DOCK_MODE_FOR_DEV`, never an actual
-  external display.
+Two of these closed together in a single reboot run:
+
+- **Boot autostart.** The receiver brings the supervisor up on its own — confirmed with the app's UI
+  never opened — and the mirror starts as soon as the pad reconnects.
+- **Node renumbering.** That same reboot moved the pad from `event9` (13:73) to `event10` (13:74),
+  and the mirror hid the right node regardless, because devices resolve by GUID before path. Trusting
+  the stale path would have aimed the unlink at an unrelated device — the case T5 exists to refuse.
+
+A third closed itself by accident: the suite SIGKILLs any live mirror at setup, which orphaned the
+real pad's node. The state file kept the record and the supervisor healed it unprompted, exercising
+T3's path against real hardware rather than a synthetic pad.
+
+What is left is untestable here rather than unverified: a failing `link()` (unforceable without
+sabotaging the filesystem), a device without `PServerBinder` (needs different hardware), and two
+external pads at once.
+
+### Testing against a real dock
+
+The dock occupies the USB port adb uses, which is why the real `DisplayManager` path went unobserved
+for so long — `FORCE_DOCK_MODE_FOR_DEV` returns before that code is ever reached, so a forced-dock
+run proves nothing about it. Use wireless adb: while still on the cable run `adb tcpip 5555`, take
+the device IP from `adb shell ip route`, then `adb connect <ip>:5555` and unplug. The link does not
+survive a reboot, so re-pair over USB afterwards.
+
+Verified end to end this way: docking is detected (a display with a non-default id, state ON), the
+mirror starts and hides the pad, and undocking stops it and hands the pad back with no hidden-state
+record left behind.
+
+Use a **Bluetooth** pad for the undock half. With a 2.4GHz dongle plugged into the dock, undocking
+disconnects the controller along with the display, and "the pad did not come back" becomes
+indistinguishable from "the pad is gone" — a confound that costs a full test cycle to spot.
 
 There is no CI story: every test here needs the handheld attached. That is a property of the
 product, not a gap in the suite.
