@@ -48,6 +48,25 @@ path.
 | T4 owner watchdog | A daemon outliving its app (uninstall, cleared data) and keeping the pad grabbed and hidden forever. |
 | T5 identity refusal | The daemon unlinking an unrelated device after event numbers renumber. |
 
+## Measuring what the mirror costs
+
+```
+adb shell sh /data/local/tmp/latency.sh 300
+```
+
+Runs the shipped daemon between two synthetic pads and times a button press round trip. Timing lives
+inside the injecting process because the source cannot be read while the daemon holds it grabbed, and
+timing across two processes would mean correlating two clock domains.
+
+It reports a **control** first — the same round trip with no daemon in between — because the raw
+figure includes uinput, the input core and the harness's own wake-up. The mirror's real contribution
+is the difference. Measured on an Odin 2 Portal, 300 samples: control median 20µs, mirrored median
+108µs, so the daemon adds **roughly 0.09ms** (p95 ≈ 0.37ms). About half a percent of one 60Hz frame,
+against the 10–25ms a Bluetooth pad already spends on radio.
+
+Re-run it after touching the forwarding path. A regression there is invisible to every other test in
+this suite, which only checks that events arrive, never how fast.
+
 ## Design rules
 
 **The product is tested through its no-root path.** `su` appears in the runner only as *scaffolding*

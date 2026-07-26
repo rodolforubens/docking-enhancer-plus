@@ -32,6 +32,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/poll.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ODIN_VENDOR_ID 0x2020
@@ -166,6 +168,110 @@ static int create_device(const char *name, int vendor, int product, int plain) {
     return fd;
 }
 
+static long long now_us(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000LL + t.tv_nsec / 1000;
+}
+
+static int compare_ll(const void *a, const void *b) {
+    long long x = *(const long long *)a;
+    long long y = *(const long long *)b;
+    return (x > y) - (x < y);
+}
+
+// Read and discard whatever the target already has queued, so a sample times its OWN event.
+static void drain(int fd) {
+    struct input_event ev;
+    while (read(fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+        // keep draining
+    }
+}
+
+/*
+ * Measure what the mirror adds to a button press, round trip, in one process and one clock.
+ *
+ * Timing the source against the target from outside would mean correlating two different clock
+ * domains — and the source cannot even be read while the daemon holds it grabbed. Instead this
+ * writes the event itself and waits for it to come back out of the target, so t1-t0 covers the
+ * whole path: uinput -> kernel -> daemon read -> daemon write -> kernel -> our read. Our own
+ * wake-up is inside that window too, which makes every number here an upper bound rather than a
+ * flattering one.
+ */
+static void run_latency(int fd, const char *target_path, int samples) {
+    if (samples <= 0 || samples > 2000) {
+        printf("latency: sample count must be 1..2000\n");
+        return;
+    }
+    int target = open(target_path, O_RDONLY | O_NONBLOCK);
+    if (target < 0) {
+        printf("latency: cannot open %s\n", target_path);
+        return;
+    }
+
+    long long *deltas = calloc((size_t)samples, sizeof(long long));
+    if (deltas == NULL) {
+        close(target);
+        return;
+    }
+
+    int collected = 0;
+    int lost = 0;
+    for (int i = 0; i < samples; i++) {
+        drain(target);
+        int value = (i % 2 == 0) ? 1 : 0;  // alternate press/release; a repeat would be dropped
+
+        long long t0 = now_us();
+        emit(fd, EV_KEY, BTN_SOUTH, value);
+        emit(fd, EV_SYN, SYN_REPORT, 0);
+
+        long long t1 = -1;
+        while (t1 < 0) {
+            struct pollfd p = { .fd = target, .events = POLLIN, .revents = 0 };
+            if (poll(&p, 1, 250) <= 0) {
+                break;  // never arrived; count it and move on
+            }
+            struct input_event ev;
+            while (read(target, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+                if (ev.type == EV_KEY && ev.code == BTN_SOUTH) {
+                    t1 = now_us();
+                    break;
+                }
+            }
+        }
+
+        if (t1 < 0) {
+            lost++;
+        } else {
+            deltas[collected++] = t1 - t0;
+        }
+        usleep(4000);  // let the pipeline settle so samples stay independent
+    }
+
+    if (collected == 0) {
+        printf("latency: no samples got through (is the mirror running on this pair?)\n");
+        free(deltas);
+        close(target);
+        return;
+    }
+
+    qsort(deltas, (size_t)collected, sizeof(long long), compare_ll);
+    long long sum = 0;
+    for (int i = 0; i < collected; i++) {
+        sum += deltas[i];
+    }
+    printf("latency samples=%d lost=%d (microseconds)\n", collected, lost);
+    printf("  min    %lld\n", deltas[0]);
+    printf("  median %lld\n", deltas[collected / 2]);
+    printf("  mean   %lld\n", sum / collected);
+    printf("  p95    %lld\n", deltas[(collected * 95) / 100]);
+    printf("  max    %lld\n", deltas[collected - 1]);
+    fflush(stdout);
+
+    free(deltas);
+    close(target);
+}
+
 // One ABS_X wiggle plus SYN per frame. Two alternating values because the input core drops an
 // absolute event that repeats its current value, which would leave the batch half empty.
 static void run_burst(int fd, int frames) {
@@ -236,6 +342,12 @@ int main(int argc, char **argv) {
             emit(fd, EV_SYN, SYN_REPORT, 0);
         } else if (sscanf(line, "burst %d", &value) == 1) {
             run_burst(fd, value);
+        } else if (strncmp(line, "measure ", 8) == 0) {
+            char path[128];
+            int n = 0;
+            if (sscanf(line, "measure %127s %d", path, &n) == 2) {
+                run_latency(fd, path, n);
+            }
         } else if (sscanf(line, "sleep %d", &value) == 1) {
             usleep((useconds_t)value * 1000);
         }

@@ -12,7 +12,8 @@ Public License v2.0. See [LICENSE](LICENSE) for the full text.
 
 The no-root approach used by this project — obtaining the stock firmware's
 `PServerBinder` service via reflection and running privileged commands through
-it — was pioneered by **ClusterTune** and popularized by **PULSE**
+it — was pioneered by **ClusterTune**
+(https://github.com/AurelioB/ClusterTune) and popularized by **PULSE**
 (https://github.com/keiretrogaming/pulse), which is licensed under the GNU
 General Public License v2.0.
 
