@@ -38,13 +38,20 @@ It runs a small native daemon that reads the external controller and writes into
 
 ## Supported devices
 
-| Device                               | SoC                | Android | Notes                           |
-| ------------------------------------ | ------------------ | ------- | ------------------------------- |
-| **AYN Odin 2 / Portal**              | Snapdragon 8 Gen 2 | 13      | Primary target, hardware-tested |
-| Other handhelds with `PServerBinder` | Qualcomm           | —       | Likely work; not tested         |
+| Device                               | SoC                | Android | Notes                                                  |
+| ------------------------------------ | ------------------ | ------- | ------------------------------------------------------ |
+| **AYN Odin 2 / Portal**              | Snapdragon 8 Gen 2 | 13      | Primary target, hardware-tested                        |
+| **AYN Odin 2 Mini**                  | Snapdragon 8 Gen 2 | 13      | **Not supported** — `PServerBinder` registered but dead |
+| Other handhelds with `PServerBinder` | Qualcomm           | —       | Likely work; not tested                                |
 
 > [!NOTE]
 > Support is gated at runtime purely on whether the `PServerBinder` service exists — not on a model list — so any handheld that ships it has a good chance of working.
+
+**Why the Mini is out.** It ships `PServerBinder` and the service is registered, so the app is
+happy to start — but the process behind it is dead, and every privileged call fails with
+`DeadObjectException`. Confirmed on firmware `V1.0.0.117_20240626`. Nothing in the app can work
+around a service that isn't running, so on the Mini the only workable path would be root. If a
+newer firmware brings the service back to life, the app should work with no changes.
 
 ## How it works
 

@@ -266,12 +266,12 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
     }
 
     if (state.unsupported) {
-        UnsupportedDeviceDialog()
+        UnsupportedDeviceDialog(serviceUnresponsive = state.serviceUnresponsive)
     }
 }
 
 @Composable
-private fun UnsupportedDeviceDialog() {
+private fun UnsupportedDeviceDialog(serviceUnresponsive: Boolean) {
     // No dismiss handler: the mirror cannot run here, so the notice stays put.
     Dialog(onDismissRequest = {}) {
         Column(
@@ -285,8 +285,16 @@ private fun UnsupportedDeviceDialog() {
             Text("Unsupported device", color = Palette.danger, fontSize = 17.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.height(12.dp))
             Text(
-                "This app needs the built-in PServer service that ships on handhelds like the AYN Odin 2 " +
-                    "family. Your device doesn't have it, so the dock mirror can't run here.",
+                if (serviceUnresponsive) {
+                    // Some firmware publishes the service while the process behind it is dead.
+                    // Saying "your device doesn't have it" would be plainly wrong on hardware that
+                    // ships it, so this case gets its own wording.
+                    "Your device ships the PServer service the mirror needs, but it isn't " +
+                        "responding. This can happen on some firmware versions."
+                } else {
+                    "This app needs the built-in PServer service that ships on handhelds like the AYN " +
+                        "Odin 2 family. Your device doesn't have it, so the dock mirror can't run here."
+                },
                 color = Palette.textSecondary,
                 fontSize = 14.sp,
             )

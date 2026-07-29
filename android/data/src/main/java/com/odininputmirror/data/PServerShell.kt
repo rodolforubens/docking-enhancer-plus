@@ -32,6 +32,8 @@ internal class PServerShell(
 
     override val isAvailable: Boolean get() = pserver.isAvailable
 
+    override val isRegisteredButUnresponsive: Boolean get() = pserver.isRegisteredButUnresponsive
+
     override fun exec(command: String): Boolean = transact(command)
 
     override fun read(command: String): String {

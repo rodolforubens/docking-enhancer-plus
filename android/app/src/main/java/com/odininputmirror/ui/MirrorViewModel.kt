@@ -35,6 +35,9 @@ data class MirrorUiState(
     val docked: Boolean = false,
     val manualInternalGuid: String? = null,
     val unsupported: Boolean = false,
+    // The service is published but never answers (Odin 2 Mini). Distinct from absent, because
+    // telling that owner their device "doesn't have it" would be flatly wrong.
+    val serviceUnresponsive: Boolean = false,
     val virtualMouse: Boolean = false,
 ) {
     // On a recognised handheld (e.g. Odin) the native layer flags the internal controller by
@@ -69,7 +72,13 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 }
             }
         } else {
-            _state.update { it.copy(loading = false, unsupported = true) }
+            _state.update {
+                it.copy(
+                    loading = false,
+                    unsupported = true,
+                    serviceUnresponsive = graph.isServiceUnresponsive,
+                )
+            }
         }
     }
 

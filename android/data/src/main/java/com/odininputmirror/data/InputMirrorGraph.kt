@@ -27,6 +27,9 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
     /** True when this device ships the PServerBinder service the mirror needs. */
     val isSupportedDevice: Boolean get() = shell.isAvailable
 
+    /** True when the firmware publishes PServerBinder but it does not answer (Odin 2 Mini). */
+    val isServiceUnresponsive: Boolean get() = shell.isRegisteredButUnresponsive
+
     val settingsRepository: MirrorSettingsRepository = AndroidMirrorSettingsRepository(appContext)
     val dockStateRepository: DockStateRepository = AndroidDisplayDockStateRepository(appContext, forceDockMode)
     val processRepository: MirrorProcessRepository = RootMirrorProcessRepository(

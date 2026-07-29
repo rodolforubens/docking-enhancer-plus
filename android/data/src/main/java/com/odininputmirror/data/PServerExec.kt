@@ -14,6 +14,12 @@ internal interface PServerTransactor {
     /** True when the backend can actually run privileged commands on this device. */
     val isAvailable: Boolean
 
+    /**
+     * True when the service is published but will not answer — distinct from absent, and worth
+     * telling apart: "your device doesn't ship this" is plainly wrong on hardware that does.
+     */
+    val isRegisteredButUnresponsive: Boolean get() = false
+
     /** Runs [command] as root; returns its stdout reply, or a failure if the transact didn't land. */
     fun executeAsRoot(command: String): Result<String?>
 }
@@ -44,13 +50,40 @@ internal class PServerExec : PServerTransactor {
     @Volatile
     private var cachedBinder: IBinder? = null
 
-    override val isAvailable: Boolean get() = binder() != null
+    // Whether the service actually answered a transaction, cached per resolved binder. Null until
+    // probed.
+    @Volatile
+    private var respondsToTransactions: Boolean? = null
+
+    /*
+     * Registered is not the same as working. The AYN Odin 2 Mini publishes PServerBinder — the
+     * handle resolves and `isBinderAlive` is true — but every transaction against it throws
+     * DeadObjectException, because the process behind the service is gone. Judging availability by
+     * the handle alone left that device with an app that looked installed and simply did nothing:
+     * no controllers, no error, nothing to act on. So availability means "answered a real
+     * transaction", and a device that cannot be driven is told so.
+     */
+    override val isAvailable: Boolean
+        get() {
+            if (binder() == null) {
+                return false
+            }
+            respondsToTransactions?.let { return it }
+            // Cheapest command there is; only whether the transaction lands matters.
+            return executeAsRoot("true").isSuccess.also { respondsToTransactions = it }
+        }
+
+    /** True when the service exists but refuses to answer — the Odin 2 Mini case. */
+    override val isRegisteredButUnresponsive: Boolean
+        get() = binder() != null && !isAvailable
 
     private fun binder(): IBinder? {
         val current = cachedBinder
         if (current != null && current.isBinderAlive) {
             return current
         }
+        // A fresh handle deserves a fresh verdict: the old one may have been probed while dead.
+        respondsToTransactions = null
         return resolveBinder().also { cachedBinder = it }
     }
 
@@ -80,6 +113,7 @@ internal class PServerExec : PServerTransactor {
             if (throwable is DeadObjectException) {
                 // Drop the dead handle so the next call re-resolves the (possibly restarted) service.
                 cachedBinder = null
+                respondsToTransactions = false
             }
             Result.failure(throwable)
         } finally {

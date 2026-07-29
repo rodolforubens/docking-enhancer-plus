@@ -14,6 +14,9 @@ internal interface MirrorShell {
     /** True when this backend can actually run privileged commands on this device. */
     val isAvailable: Boolean
 
+    /** True when the privileged service exists but will not answer (see [PServerExec]). */
+    val isRegisteredButUnresponsive: Boolean get() = false
+
     /**
      * Run [command] as root; stdout is ignored. Returns true when the command was DELIVERED to the
      * backend — PServer reports no exit code, so this cannot say whether the command itself
