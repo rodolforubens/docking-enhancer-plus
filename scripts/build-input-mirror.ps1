@@ -1,7 +1,13 @@
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Source = Join-Path $Root "android/app/src/main/native/input_mirror.c"
+$NativeDir = Join-Path $Root "android/app/src/main/native"
+# Every .c in the directory: the daemon is one binary split across a few translation units, so
+# adding a module means dropping a file in, not editing this script.
+$Sources = @(Get-ChildItem -Path $NativeDir -Filter *.c | ForEach-Object { $_.FullName })
+if ($Sources.Count -eq 0) {
+    throw "No .c sources found in $NativeDir"
+}
 $AssetDir = Join-Path $Root "android/app/src/main/assets/input_mirror"
 $Output = Join-Path $AssetDir "input_mirror"
 
@@ -16,7 +22,7 @@ if (-not (Test-Path $Clang)) {
 
 New-Item -ItemType Directory -Force -Path $AssetDir | Out-Null
 
-& $Clang -O3 -Wall -Wextra -std=c11 -D_GNU_SOURCE $Source -o $Output
+& $Clang -O3 -Wall -Wextra -std=c11 -D_GNU_SOURCE @Sources -o $Output
 if ($LASTEXITCODE -ne 0) {
     throw "NDK build failed with exit code $LASTEXITCODE"
 }

@@ -147,10 +147,15 @@ $env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\<version>"
 .\scripts\build-input-mirror.ps1
 ```
 
-The build script compiles for `arm64-v8a` and drops the result into
+The daemon is one binary split across a few translation units — `input_mirror.c` holds the mirror
+loop and its handlers, `config.c` the live configuration and control fifo, `hide_nodes.c` the
+hide/restore/heal of `/dev/input` entries. The build script compiles every `.c` in that directory,
+so adding a module means dropping a file in rather than editing the script.
+
+It targets `arm64-v8a` and drops the result into
 `android/app/src/main/assets/input_mirror/input_mirror`, which is tracked intentionally so users
-don't need an NDK. **Rebuild and commit it in the same commit as any `input_mirror.c` change**, or
-the repo describes one daemon and ships another.
+don't need an NDK. **Rebuild and commit it in the same commit as any native source change**, or the
+repo describes one daemon and ships another.
 
 Stack: Kotlin 2.0.21 · Compose + Material 3 (BOM 2024.10.01) · Gradle 8.11.1 · AGP 8.7.3 · JVM 17 ·
 minSdk 28 · target/compileSdk 35.
