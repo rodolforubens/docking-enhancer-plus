@@ -40,8 +40,6 @@ class MirrorUseCaseTest {
                 comboHoldKillApp = true,
                 expectedRunning = true,
                 startedAt = 1234L,
-                startedHomeAsBack = true,
-                startedComboHoldKillApp = true,
             ),
             settings.state,
         )
@@ -344,9 +342,10 @@ class MirrorUseCaseTest {
     }
 
     @Test
-    fun autoMirrorRestartsWhenOptionFlagsChangedSinceStart() {
-        // Daemon launched with virtualMouse off; the user toggled it on afterwards. Same devices,
-        // still running — but the stale daemon must be restarted with the new flags.
+    fun autoMirrorPushesSettingsInsteadOfRestartingWhenOptionsChanged() {
+        // The user toggled an option, so the settings have moved to a newer generation than the one
+        // the running daemon reports. Same devices, still running: it needs the new config handed
+        // to it, NOT a restart — a restart would release the grab and flash the pad visible.
         val decision = ResolveAutoMirrorDecisionUseCase()(
             dockActive = true,
             devices = reconnectedControllers(),
@@ -354,25 +353,50 @@ class MirrorUseCaseTest {
                 source = "/dev/input/event11",
                 target = "/dev/input/event4",
                 virtualMouse = true,
-                startedVirtualMouse = false,
+                configGeneration = 5L,
             ),
             mirrorRunning = true,
+            appliedGeneration = 4L,
         )
 
-        assertEquals(
-            AutoMirrorDecision.Restart(
-                mirrorRequest(
-                    source = "/dev/input/event11",
-                    target = "/dev/input/event4",
-                    sourceGuid = "external-guid",
-                    targetGuid = "local-guid",
-                    homeAsBack = true,
-                    comboHoldKillApp = true,
-                    virtualMouse = true,
-                )
+        assertEquals(AutoMirrorDecision.ApplyLiveSettings, decision)
+    }
+
+    @Test
+    fun autoMirrorIsRunningOnceTheDaemonAcknowledgesTheGeneration() {
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = reconnectedControllers(),
+            settings = restartableSettings().copy(
+                source = "/dev/input/event11",
+                target = "/dev/input/event4",
+                configGeneration = 5L,
             ),
-            decision,
+            mirrorRunning = true,
+            appliedGeneration = 5L,
         )
+
+        assertEquals(AutoMirrorDecision.Running, decision)
+    }
+
+    @Test
+    fun autoMirrorLeavesADaemonAloneUntilItReportsAGeneration() {
+        // A daemon that has not answered yet is not a stale one. Treating silence as staleness would
+        // push settings at it on every tick of its startup window.
+        val decision = ResolveAutoMirrorDecisionUseCase()(
+            dockActive = true,
+            devices = reconnectedControllers(),
+            settings = restartableSettings().copy(
+                source = "/dev/input/event11",
+                target = "/dev/input/event4",
+                virtualMouse = true,
+                configGeneration = 5L,
+            ),
+            mirrorRunning = true,
+            appliedGeneration = null,
+        )
+
+        assertEquals(AutoMirrorDecision.Running, decision)
     }
 
     @Test
@@ -413,8 +437,6 @@ class MirrorUseCaseTest {
         homeAsBack = true,
         comboHoldKillApp = true,
         expectedRunning = true,
-        startedHomeAsBack = true,
-        startedComboHoldKillApp = true,
     )
 
     private fun reconnectedControllers() = listOf(
@@ -498,6 +520,17 @@ private class FakeMirrorProcessRepository(
     }
 
     override fun healOrphanedHideNodes() {}
+
+    val liveSettingsPushes = mutableListOf<MirrorSettings>()
+    var reloadDelivered = true
+    var reportedGeneration: Long? = null
+
+    override fun applyLiveSettings(settings: MirrorSettings): Boolean {
+        liveSettingsPushes += settings
+        return reloadDelivered
+    }
+
+    override fun appliedConfigGeneration(): Long? = reportedGeneration
 }
 
 private class FakeMirrorSettingsRepository(
@@ -516,9 +549,6 @@ private class FakeMirrorSettingsRepository(
             homeAsBack = request.homeAsBack,
             comboHoldKillApp = request.comboHoldKillApp,
             virtualMouse = request.virtualMouse,
-            startedHomeAsBack = request.homeAsBack,
-            startedComboHoldKillApp = request.comboHoldKillApp,
-            startedVirtualMouse = request.virtualMouse,
             expectedRunning = true,
             startedAt = startedAt,
         )

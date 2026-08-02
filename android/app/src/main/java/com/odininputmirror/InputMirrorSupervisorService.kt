@@ -100,6 +100,11 @@ class InputMirrorSupervisorService : Service() {
                     settings = settings,
                     mirrorRunning = mirrorRunning,
                     restartAllowed = now >= nextRestartAllowedAt && now >= nextStartRetryAllowedAt,
+                    appliedGeneration = if (mirrorRunning) {
+                        graph.processRepository.appliedConfigGeneration()
+                    } else {
+                        null
+                    },
                 )
 
                 when (decision) {
@@ -125,6 +130,21 @@ class InputMirrorSupervisorService : Service() {
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }
                     AutoMirrorDecision.Running -> {
+                        updateSupervisorState(SupervisorState.Active)
+                        sleepMs = SUPERVISOR_INTERVAL_MS
+                    }
+                    AutoMirrorDecision.ApplyLiveSettings -> {
+                        val delivered = runCatching {
+                            graph.processRepository.applyLiveSettings(settings)
+                        }.getOrDefault(false)
+                        if (!delivered) {
+                            // The daemon is alive but deaf on its control channel. Stopping it hands
+                            // the next tick a clean start carrying the new options — the restart
+                            // path is still here, it is just the fallback now rather than the
+                            // mechanism.
+                            Log.w(TAG, "Could not deliver settings to the daemon; restarting it")
+                            runCatching { graph.stopMirror() }
+                        }
                         updateSupervisorState(SupervisorState.Active)
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }

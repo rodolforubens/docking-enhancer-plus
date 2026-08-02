@@ -12,11 +12,8 @@ data class MirrorSettings(
     val expectedRunning: Boolean = false,
     val startedAt: Long = 0L,
     val manualInternalGuid: String? = null,
-    // Snapshot of the option flags the RUNNING daemon was launched with (persisted at start; the
-    // daemon can outlive the app process). When a toggle changes homeAsBack/comboHoldKillApp/
-    // virtualMouse afterwards, these diverge from the live values above and the auto-mirror
-    // decision restarts the daemon so the new flags actually take effect.
-    val startedHomeAsBack: Boolean = false,
-    val startedComboHoldKillApp: Boolean = false,
-    val startedVirtualMouse: Boolean = false,
+    // Advances every time a live option changes. The running daemon echoes the generation it has
+    // actually adopted in its heartbeat, so comparing the two says whether a toggle has taken
+    // effect — which is what lets a settings change reach the daemon without restarting it.
+    val configGeneration: Long = 0L,
 )

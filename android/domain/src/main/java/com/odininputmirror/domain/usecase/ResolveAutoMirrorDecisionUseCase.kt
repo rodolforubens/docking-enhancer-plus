@@ -11,6 +11,9 @@ class ResolveAutoMirrorDecisionUseCase {
         settings: MirrorSettings,
         mirrorRunning: Boolean,
         restartAllowed: Boolean = true,
+        // Generation of the config the running daemon reports it has adopted; null when it hasn't
+        // said yet (it has only just started) or cannot say (a daemon predating the ack).
+        appliedGeneration: Long? = null,
     ): AutoMirrorDecision {
         if (!dockActive) {
             return AutoMirrorDecision.StopForDock
@@ -41,13 +44,17 @@ class ResolveAutoMirrorDecisionUseCase {
             settings.targetGuid == local.guid &&
             settings.source == external.path &&
             settings.target == local.path
-        // The daemon reads its option flags once at launch; if a toggle changed them since, the
-        // running mirror is stale and must be restarted for the new flags to take effect.
-        val sameFlags = settings.startedHomeAsBack == settings.homeAsBack &&
-            settings.startedComboHoldKillApp == settings.comboHoldKillApp &&
-            settings.startedVirtualMouse == settings.virtualMouse
-        if (mirrorRunning && sameMirror && sameFlags) {
-            return AutoMirrorDecision.Running
+        if (mirrorRunning && sameMirror) {
+            // The daemon re-reads its options on demand now, so a changed toggle needs a push, not a
+            // restart — which is what spares the user the second of visible controller that
+            // releasing the exclusive grab costs.
+            return when (appliedGeneration) {
+                settings.configGeneration -> AutoMirrorDecision.Running
+                // Silence is not staleness: a daemon that has not reported yet is one we have
+                // nothing to correct. Pushing here would fire on every tick of the startup window.
+                null -> AutoMirrorDecision.Running
+                else -> AutoMirrorDecision.ApplyLiveSettings
+            }
         }
         if (!restartAllowed) {
             return AutoMirrorDecision.WaitingForRestartThrottle
@@ -71,6 +78,12 @@ sealed class AutoMirrorDecision {
     object WaitingForExternalController : AutoMirrorDecision()
     object WaitingForRestartThrottle : AutoMirrorDecision()
     object Running : AutoMirrorDecision()
+
+    /**
+     * The right mirror is running, but with options the user has since changed. Hand it the new
+     * config instead of restarting it.
+     */
+    object ApplyLiveSettings : AutoMirrorDecision()
     data class Start(val request: MirrorStartRequest) : AutoMirrorDecision()
     data class Restart(val request: MirrorStartRequest) : AutoMirrorDecision()
 }

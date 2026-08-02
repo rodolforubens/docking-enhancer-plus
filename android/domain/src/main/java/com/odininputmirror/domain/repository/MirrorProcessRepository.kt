@@ -1,5 +1,6 @@
 package com.odininputmirror.domain.repository
 
+import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 
 interface MirrorProcessRepository {
@@ -21,4 +22,19 @@ interface MirrorProcessRepository {
      * so a lingering hidden node can't keep the external controller invisible.
      */
     fun healOrphanedHideNodes()
+
+    /**
+     * Hand the live options to a running daemon without restarting it — which matters because a
+     * restart has to release the exclusive grab, leaving the controller visible to the whole system
+     * for about a second. Returns whether the request was delivered; the daemon confirms that it
+     * actually adopted them through [appliedConfigGeneration].
+     */
+    fun applyLiveSettings(settings: MirrorSettings): Boolean
+
+    /**
+     * Generation of the config the running daemon has adopted, or null when it cannot be read — no
+     * fresh heartbeat, or a daemon predating the ack. Null is what sends callers back to the restart
+     * path instead of leaving a toggle silently unapplied.
+     */
+    fun appliedConfigGeneration(): Long?
 }

@@ -47,6 +47,7 @@ path.
 | T3 orphan heal | A hard-killed daemon leaving a node hidden that `--heal` cannot recover. |
 | T4 owner watchdog | A daemon outliving its app (uninstall, cleared data) and keeping the pad grabbed and hidden forever. |
 | T5 identity refusal | The daemon unlinking an unrelated device after event numbers renumber. |
+| T6 hot reload | A settings change silently not taking effect, a malformed config being adopted, or the daemon restarting to apply one — which would release the grab and flash the pad visible. |
 
 ## Measuring what the mirror costs
 
@@ -112,10 +113,12 @@ committing). Watch the system side with `pidof input_mirror`, `dumpsys input | g
 
 ### Settled behaviour worth knowing (measured, not assumed)
 
-- **Restarts flash the pad visible for ~0.5–1s.** Every settings change restarts the daemon, and
-  `EVIOCGRAB` is exclusive, so the old one must release before the new one grabs. A game open at that
-  moment can briefly see two controllers. Inherent to the design, not a defect — the alternative is
-  risking a node that never comes back.
+- **Restarts flash the pad visible for ~0.5–1s.** `EVIOCGRAB` is exclusive, so the old daemon must
+  release before the new one grabs, and a game open at that moment can briefly see two controllers.
+  Inherent to a restart, not a defect. What changed is how often you pay it: settings no longer
+  restart the daemon (they reload through the control fifo, covered by T6), so only a change of which
+  devices are mirrored costs a restart now. **The rapid-toggling figures below were measured under
+  the old restart-per-toggle behaviour and need re-measuring.**
 - **Rapid toggling never stranded the pad.** Five restarts in 45s of hammering, and the dangerous
   state — hidden with no daemon running — did not occur once: each daemon restores before dying and
   the next one re-hides.

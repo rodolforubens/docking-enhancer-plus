@@ -71,6 +71,38 @@ recycled across reconnects, so a path resolved a moment ago may point at a diffe
 time the daemon acts on it. What it hid is recorded to a state file, so a crash can be healed rather
 than leaving a controller invisible. The supervisor heals orphans on its next tick.
 
+## Changing a setting without restarting
+
+Options used to be fixed at launch, so every toggle restarted the daemon — and a restart has to
+release the exclusive `EVIOCGRAB` before the next session can take it, leaving the pad visible to
+the whole system for about a second. Instead:
+
+1. The app serialises the live options to `input_mirror.config.json` in its own directory, writing a
+   temp file and `rename()`-ing it into place. Rename within one filesystem is atomic, so the daemon
+   can never read a half-written document and neither side needs a lock.
+2. The app writes `reload` to a fifo it created itself with `Os.mkfifo`. **This deliberately does not
+   go through PServer**, whose transactions are serialized process-wide — the app owns both the
+   config and the fifo, so a toggle never queues behind anything.
+3. The daemon watches that fifo in the same `poll()` as the source, and swaps its config between two
+   events. The forwarding path and the grab are untouched.
+
+The fifo is opened `O_RDWR` by the daemon so it is its own phantom writer: as the only reader it
+would otherwise get `POLLHUP` on every gap between writes and spin the loop. The app writes with
+`O_NONBLOCK`, so a dead daemon fails immediately instead of blocking the writer forever.
+
+Applying a config is a reconcile, not an assignment: a flag turning **off** may own live state that
+only the old value knows how to unwind — dropping the virtual mouse while its pointer exists would
+strand a uinput device and a visible cursor. Turning one **on** needs no such care.
+
+The acknowledgement closes the loop. Each change advances a generation the daemon echoes in its
+heartbeat, so the app can tell an applied change from one in flight. A config that fails to parse is
+never adopted: the running one survives, and the generation the app is waiting for simply never
+arrives. If the daemon can't be reached at all, the supervisor stops it and the next tick starts a
+fresh one carrying the new options — the restart still exists, as the fallback rather than the
+mechanism.
+
+The one thing that still restarts the daemon is changing **which devices** are mirrored.
+
 ## Latency
 
 **The mirror adds roughly 0.09 ms to a button press** (p95 ≈ 0.37 ms), measured on an Odin 2 Portal
@@ -94,8 +126,6 @@ Reproduce it with the e2e suite's `latency.sh`.
 - While hidden, the external pad is invisible to everything — it stays connected at the transport
   level (still paired in Bluetooth settings, still enumerated over USB) but is no longer an input
   device to anything but the daemon.
-- Changing a setting restarts the daemon, which leaves the pad visible for about a second: the
-  exclusive grab has to be released before the new session can take it.
 - The virtual mouse can't drag the notification shade open the way a finger swipe does, so **R1**
   toggles it via a system command. The app tracks that state itself, so closing the shade another way
   may cost one extra press to resync.

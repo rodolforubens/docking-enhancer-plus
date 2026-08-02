@@ -1,12 +1,25 @@
 package com.odininputmirror.data
 
 import android.content.Context
+import android.system.Os
+import android.system.OsConstants
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 
 internal class InputMirrorFiles(
     private val filesDir: File,
+    // Injected for the same reason openBinaryAsset is: android.system.Os is a stub on the JVM, and
+    // the file layout deserves to stay unit-testable without a device or Robolectric. Declared
+    // ahead of openBinaryAsset so that stays the last parameter, and callers keep passing it as a
+    // trailing lambda.
+    private val makeFifo: (String) -> Unit = { path ->
+        Os.mkfifo(path, OsConstants.S_IRUSR or OsConstants.S_IWUSR)
+    },
+    private val isFifo: (String) -> Boolean = { path ->
+        OsConstants.S_ISFIFO(Os.stat(path).st_mode)
+    },
     private val openBinaryAsset: () -> InputStream,
 ) {
     constructor(context: Context) : this(
@@ -24,6 +37,49 @@ internal class InputMirrorFiles(
     // a crash so the daemon's --heal mode can restore an orphaned node the crash left behind.
     val hiddenStateFile: File
         get() = File(filesDir, "input_mirror.hidden")
+
+    // The live options the daemon re-reads on demand, and the fifo it is told to re-read them on.
+    val configFile: File
+        get() = File(filesDir, "input_mirror.config.json")
+
+    val controlFifo: File
+        get() = File(filesDir, "input_mirror.ctl")
+
+    /**
+     * Create the control fifo if it isn't already there.
+     *
+     * It lives in the app's own directory and is created by the app, which is the whole point: the
+     * app owns the path so no privileged call is needed to make it, and the daemon — running as
+     * root — can read it. That keeps every settings change off the PServer transaction queue, which
+     * is serialized process-wide and would otherwise be in the path of a toggle.
+     */
+    fun ensureControlFifo(): File {
+        val fifo = controlFifo
+        // A leftover of the wrong kind (a plain file from an interrupted write, say) would make
+        // mkfifo fail with EEXIST forever, so replace anything that is not already a fifo.
+        val existingIsFifo = runCatching { isFifo(fifo.absolutePath) }.getOrDefault(false)
+        if (existingIsFifo) {
+            return fifo
+        }
+        fifo.delete()
+        makeFifo(fifo.absolutePath)
+        return fifo
+    }
+
+    /**
+     * Replace the config the daemon reads, atomically.
+     *
+     * Written to a sibling temp file and renamed into place: rename within one filesystem is atomic,
+     * so the daemon can never read a half-written document, and neither side needs a lock.
+     */
+    fun writeConfig(json: String) {
+        val temp = File(filesDir, "${configFile.name}.tmp")
+        temp.writeText(json)
+        if (!temp.renameTo(configFile)) {
+            temp.delete()
+            throw IOException("Could not replace ${configFile.name}")
+        }
+    }
 
     fun ensureBinaryInstalled(): File {
         val binDir = File(filesDir, "bin")

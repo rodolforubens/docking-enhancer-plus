@@ -29,6 +29,10 @@ static const int HEARTBEAT_MISSING_LIMIT = 5;
 // down the whole mirror.
 static const int TARGET_WRITE_RETRIES = 3;
 
+// Largest config file we will read. The document is a handful of flags written by the app; anything
+// past this is not a config we wrote, so refusing it is safer than parsing a prefix of it.
+#define CONFIG_MAX_BYTES 8192
+
 // Events pulled from the source in a single read(). evdev returns whole events only, so one read
 // coalesces a frame's worth of axis+button+SYN events instead of one syscall each. 32 is ample —
 // a single frame rarely exceeds ~10 events; any overflow is drained by the next loop.
@@ -617,6 +621,130 @@ static void restore_from_state_file(const char *path) {
     }
 }
 
+/*
+ * Live configuration.
+ *
+ * Every option below used to be fixed at launch, so changing one meant restarting the daemon — which
+ * costs the exclusive grab, and with it about a second of the pad being visible to the whole system.
+ * Instead the app writes this document and pokes the control fifo; we re-read it between two events.
+ *
+ * `generation` is the contract that makes the change observable: the app picks the next number,
+ * writes the file, asks for a reload, and waits to see that number come back in the heartbeat. A
+ * config we fail to parse is never adopted, so the previous one keeps running and the app sees its
+ * generation stall rather than a toggle that silently lied.
+ */
+struct config {
+    int home_as_back;
+    int combo_hold_kill_app;
+    int virtual_mouse;
+    long long generation;
+};
+
+// Point just past the colon following "key", skipping whitespace. NULL when the key is absent or
+// isn't followed by a colon. Deliberately a scanner rather than a parser: this document has one flat
+// level and we write both ends of it, so the cost of a real JSON parser buys nothing here.
+static const char *json_value_of(const char *json, const char *key) {
+    char needle[64];
+    int length = snprintf(needle, sizeof(needle), "\"%s\"", key);
+    if (length <= 0 || (size_t)length >= sizeof(needle)) {
+        return NULL;
+    }
+
+    const char *at = strstr(json, needle);
+    if (at == NULL) {
+        return NULL;
+    }
+    at += length;
+
+    while (*at == ' ' || *at == '\t' || *at == '\n' || *at == '\r') {
+        at++;
+    }
+    if (*at != ':') {
+        return NULL;
+    }
+    at++;
+    while (*at == ' ' || *at == '\t' || *at == '\n' || *at == '\r') {
+        at++;
+    }
+    return at;
+}
+
+// Accepts true/false and 1/0; anything else leaves the value alone, so an unknown spelling degrades
+// to "keep what we had" instead of silently reading as off.
+static int json_bool(const char *json, const char *key, int fallback) {
+    const char *value = json_value_of(json, key);
+    if (value == NULL) {
+        return fallback;
+    }
+    if (strncmp(value, "true", 4) == 0 || *value == '1') {
+        return 1;
+    }
+    if (strncmp(value, "false", 5) == 0 || *value == '0') {
+        return 0;
+    }
+    return fallback;
+}
+
+static long long json_number(const char *json, const char *key, long long fallback) {
+    const char *value = json_value_of(json, key);
+    if (value == NULL) {
+        return fallback;
+    }
+    char *end = NULL;
+    long long parsed = strtoll(value, &end, 10);
+    return end == value ? fallback : parsed;
+}
+
+// Read and parse the config, leaving `out` untouched unless the whole document is good. `generation`
+// is mandatory: it is what makes a half-written or foreign file fail loudly here rather than be
+// adopted as a set of defaults. Returns 0 on success.
+static int parse_config(const char *path, const struct config *current, struct config *out) {
+    if (path == NULL) {
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "config: cannot open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    char buffer[CONFIG_MAX_BYTES];
+    ssize_t got = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    if (got <= 0) {
+        fprintf(stderr, "config: %s is empty or unreadable\n", path);
+        return -1;
+    }
+    buffer[got] = '\0';
+
+    long long generation = json_number(buffer, "generation", -1);
+    if (generation < 0) {
+        fprintf(stderr, "config: %s has no usable generation; ignoring it\n", path);
+        return -1;
+    }
+
+    out->generation = generation;
+    out->home_as_back = json_bool(buffer, "home_as_back", current->home_as_back);
+    out->combo_hold_kill_app = json_bool(buffer, "combo_hold_kill_app", current->combo_hold_kill_app);
+    out->virtual_mouse = json_bool(buffer, "virtual_mouse", current->virtual_mouse);
+    return 0;
+}
+
+// Open the control fifo. O_RDWR matters: as the only reader we would otherwise see POLLHUP on every
+// gap between the app's writes and spin the loop at full speed. Holding a writer end of our own —
+// one we never write to — keeps the pipe permanently open and the poll quiet.
+static int open_control_fifo(const char *path) {
+    if (path == NULL) {
+        return -1;
+    }
+    int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "control: cannot open %s: %s\n", path, strerror(errno));
+    }
+    return fd;
+}
+
 // All state carried across mirror-loop iterations: the fds, the option flags, and the runtime state
 // for the kill-app combo, the heartbeat, and virtual-mouse mode. Grouping it keeps the loop body a
 // readable dispatcher and lets each feature live in its own handler.
@@ -625,6 +753,11 @@ struct mirror_state {
     int target_fd;
     int uinput_fd;  // virtual-mouse pointer (created on entering mouse mode)
     int touch_fd;   // cursor-hiding touch helper (created once per run)
+    int control_fd; // command fifo the app pokes to ask for a config reload
+
+    // Generation of the config currently in force, echoed in the heartbeat so the app can tell an
+    // applied change from one still in flight.
+    long long config_generation;
 
     const char *heartbeat_file_path;
     int heartbeat_fd;  // held open for the whole run; rewritten in place each beat
@@ -633,6 +766,10 @@ struct mirror_state {
     int combo_hold_kill_app;
     int virtual_mouse;
     int swap_nintendo_layout;
+    // A Home press we swallowed and still owe a release for. Tracked so turning Home-as-Back off
+    // mid-hold keeps swallowing that press to completion instead of handing the target a release
+    // for a key it never saw go down.
+    int home_swallowed;
 
     // Select+Start "close app" combo.
     int select_pressed;
@@ -697,8 +834,11 @@ static void write_heartbeat(struct mirror_state *s) {
         return;
     }
 
-    char stamp[32];
-    int length = snprintf(stamp, sizeof(stamp), "%lld\n", now_ms());
+    // Line 1 stays exactly the timestamp: the app judges liveness by this file's mtime and
+    // non-emptiness, and nothing appended below may disturb that. Line 2 carries the generation of
+    // the config actually in force, which is how a reload is acknowledged.
+    char stamp[64];
+    int length = snprintf(stamp, sizeof(stamp), "%lld\ngeneration %lld\n", now_ms(), s->config_generation);
     if (length <= 0 || (size_t)length >= sizeof(stamp)) {
         return;
     }
@@ -814,6 +954,59 @@ static void leave_mouse_mode(struct mirror_state *s) {
     flush_touch_cancel(s->touch_fd);
 }
 
+/*
+ * Adopt a freshly parsed config.
+ *
+ * The reason this is not `*current = *next` is that a flag turning OFF may own live state only the
+ * old value knows how to unwind. Mouse mode is the clear case: dropping --virtual-mouse while the
+ * pointer exists would strand a uinput device and a visible cursor with nothing left that would ever
+ * destroy them. So unwind first against the OLD values, then adopt.
+ *
+ * Turning a flag ON needs no such care — every feature here starts from an idle state.
+ */
+static void apply_config(struct mirror_state *s, const struct config *next) {
+    if (s->virtual_mouse && !next->virtual_mouse) {
+        if (s->mouse_mode) {
+            leave_mouse_mode(s);
+        }
+        s->mouse_combo_triggered = 0;
+        s->mouse_combo_pressed_at_ms = 0;
+    }
+    if (s->combo_hold_kill_app && !next->combo_hold_kill_app) {
+        // Drop a hold in progress so re-enabling later doesn't inherit a stale, already-expired
+        // timer and fire the moment both buttons are next seen down.
+        s->combo_triggered = 0;
+        s->combo_pressed_at_ms = 0;
+    }
+
+    s->home_as_back = next->home_as_back;
+    s->combo_hold_kill_app = next->combo_hold_kill_app;
+    s->virtual_mouse = next->virtual_mouse;
+    s->config_generation = next->generation;
+}
+
+// Read whatever the app queued on the control fifo and report whether a reload was asked for.
+// Commands are one per line and unknown ones are ignored, so a newer app talking to an older daemon
+// degrades to "no-op" rather than to a parse error.
+static int drain_control(int fd) {
+    char buffer[256];
+    int reload = 0;
+
+    for (;;) {
+        ssize_t got = read(fd, buffer, sizeof(buffer) - 1);
+        if (got <= 0) {
+            break;
+        }
+        buffer[got] = '\0';
+        // A command is a short word written in one call, and a write below PIPE_BUF is atomic, so a
+        // command never arrives split across two reads.
+        if (strstr(buffer, "reload") != NULL) {
+            reload = 1;
+        }
+    }
+    return reload;
+}
+
 // Flip mouse mode if Select+R3 has been held past the threshold. Checked every loop because the hold
 // may complete on a poll timeout with no new event.
 static void maybe_toggle_mouse_mode(struct mirror_state *s) {
@@ -868,11 +1061,20 @@ static void update_combo_tracking(struct mirror_state *s, const struct input_eve
 // Home-as-Back: swallow the Home button entirely (press, repeat and release) so the target never
 // sees a Home-down without its up, and inject Back once, on release. Returns 1 if the event was
 // consumed (must not be forwarded).
-static int handle_home_as_back(const struct mirror_state *s, const struct input_event *ev) {
-    if (!s->home_as_back || ev->type != EV_KEY || !is_home_button(ev->code)) {
+static int handle_home_as_back(struct mirror_state *s, const struct input_event *ev) {
+    if (ev->type != EV_KEY || !is_home_button(ev->code)) {
         return 0;
     }
-    if (ev->value == 0) {
+    // Keep swallowing a press we already swallowed even if the setting was turned off mid-hold: the
+    // target never saw that key go down, so letting its release through would be a release out of
+    // nowhere. The press finishes under the rules it started with.
+    if (!s->home_as_back && !s->home_swallowed) {
+        return 0;
+    }
+    if (ev->value == 1) {
+        s->home_swallowed = 1;
+    } else if (ev->value == 0) {
+        s->home_swallowed = 0;
         run_detached("input keyevent 4");
     }
     return 1;
@@ -965,7 +1167,7 @@ int main(int argc, char **argv) {
     }
 
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--config-file PATH] [--control-fifo PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -974,6 +1176,8 @@ int main(int argc, char **argv) {
     const char *pid_file_path = NULL;
     const char *heartbeat_file_path = NULL;
     const char *hidden_state_path = NULL;
+    const char *config_path = NULL;
+    const char *control_fifo_path = NULL;
     int home_as_back = 0;
     int combo_hold_kill_app = 0;
     int virtual_mouse = 0;
@@ -1010,6 +1214,16 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (strcmp(argv[index], "--config-file") == 0 && index + 1 < argc) {
+            config_path = argv[++index];
+            continue;
+        }
+
+        if (strcmp(argv[index], "--control-fifo") == 0 && index + 1 < argc) {
+            control_fifo_path = argv[++index];
+            continue;
+        }
+
         if (strcmp(argv[index], "--pid-file") == 0 && index + 1 < argc) {
             pid_file_path = argv[++index];
             continue;
@@ -1034,6 +1248,7 @@ int main(int argc, char **argv) {
     memset(&s, 0, sizeof(s));
     s.uinput_fd = -1;
     s.touch_fd = -1;
+    s.control_fd = -1;
     s.heartbeat_fd = -1;
     s.heartbeat_file_path = heartbeat_file_path;
     s.home_as_back = home_as_back;
@@ -1066,7 +1281,11 @@ int main(int argc, char **argv) {
     // exposes the right stick as ABS_Z/ABS_RZ). The abs_* arrays capture the source's rest state so
     // entering mouse mode can neutralise a held trigger/stick (enter_mouse_mode): a trigger's rest
     // value is its minimum, so a sampled-at-startup neutral avoids half-pressing it.
-    if (virtual_mouse) {
+    //
+    // Done unconditionally, even with the virtual mouse off. The setting can now be turned ON at
+    // runtime through a config reload, and by then this is the only chance we had to read the
+    // source's axis map — the pad is grabbed and its rest values long since moved.
+    {
         query_axis(s.source_fd, &s.left_x, ABS_X);
         query_axis(s.source_fd, &s.left_y, ABS_Y);
         query_axis(s.source_fd, &s.right_x, ABS_RX);
@@ -1094,6 +1313,25 @@ int main(int argc, char **argv) {
             }
         }
     }
+
+    // A config file, when present, is the authority; the command-line flags are only what to start
+    // from if it is missing or unreadable. Reading it here also means a daemon restarted for an
+    // unrelated reason (a reconnect, a crash) comes back with whatever the user last chose rather
+    // than with the flags of whichever launch happened to create it.
+    if (config_path != NULL) {
+        struct config from_flags = {
+            .home_as_back = s.home_as_back,
+            .combo_hold_kill_app = s.combo_hold_kill_app,
+            .virtual_mouse = s.virtual_mouse,
+            .generation = 0,
+        };
+        struct config initial = from_flags;
+        if (parse_config(config_path, &from_flags, &initial) == 0) {
+            apply_config(&s, &initial);
+        }
+    }
+
+    s.control_fd = open_control_fifo(control_fifo_path);
 
     // Create the touch helper on every mirror start, regardless of the virtual-mouse setting: it is
     // what hides the cursor on mouse-mode exit when enabled, and its unavoidable "connected" toast
@@ -1142,12 +1380,23 @@ int main(int argc, char **argv) {
             emit_mouse_frame(&s);
         }
 
-        struct pollfd source_poll;
-        source_poll.fd = s.source_fd;
-        source_poll.events = POLLIN;
-        source_poll.revents = 0;
+        // Watch the source and the control fifo together. Adding the fifo here rather than checking
+        // it on a timer is what keeps a settings change effectively instant while leaving the grab,
+        // and the forwarding path, completely untouched.
+        struct pollfd fds[2];
+        memset(fds, 0, sizeof(fds));
+        fds[0].fd = s.source_fd;
+        fds[0].events = POLLIN;
+        int poll_count = 1;
+        int control_index = -1;
+        if (s.control_fd >= 0) {
+            fds[1].fd = s.control_fd;
+            fds[1].events = POLLIN;
+            control_index = 1;
+            poll_count = 2;
+        }
 
-        int poll_result = poll(&source_poll, 1, timeout_ms);
+        int poll_result = poll(fds, (nfds_t)poll_count, timeout_ms);
         if (poll_result < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1159,7 +1408,26 @@ int main(int argc, char **argv) {
         // The mouse toggle may complete on a poll timeout with no new event, so check it every loop.
         maybe_toggle_mouse_mode(&s);
 
-        if (poll_result == 0) {
+        // Settings first: applying them before this batch of events means the events are handled
+        // under the config the user has already asked for, never under the one they just replaced.
+        if (control_index >= 0 && (fds[control_index].revents & POLLIN) && drain_control(s.control_fd)) {
+            struct config running = {
+                .home_as_back = s.home_as_back,
+                .combo_hold_kill_app = s.combo_hold_kill_app,
+                .virtual_mouse = s.virtual_mouse,
+                .generation = s.config_generation,
+            };
+            struct config next = running;
+            if (parse_config(config_path, &running, &next) == 0) {
+                apply_config(&s, &next);
+            } else {
+                // Keep running exactly as we were. The app notices because the generation it is
+                // waiting for never shows up in the heartbeat, and can put its toggle back.
+                fprintf(stderr, "reload: keeping the running config\n");
+            }
+        }
+
+        if (!(fds[0].revents & POLLIN)) {
             maybe_kill_combo_on_timeout(&s);
             continue;
         }
@@ -1250,6 +1518,9 @@ int main(int argc, char **argv) {
     if (s.touch_fd >= 0) {
         ioctl(s.touch_fd, UI_DEV_DESTROY);
         close(s.touch_fd);
+    }
+    if (s.control_fd >= 0) {
+        close(s.control_fd);
     }
     close(s.target_fd);
     close(s.source_fd);

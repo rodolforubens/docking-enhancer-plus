@@ -21,9 +21,7 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             expectedRunning = prefs.getBoolean(KEY_EXPECTED_RUNNING, false),
             startedAt = prefs.getLong(KEY_STARTED_AT, 0L),
             manualInternalGuid = prefs.getString(KEY_MANUAL_INTERNAL_GUID, null),
-            startedHomeAsBack = prefs.getBoolean(KEY_STARTED_HOME_AS_BACK, false),
-            startedComboHoldKillApp = prefs.getBoolean(KEY_STARTED_COMBO_HOLD_KILL_APP, false),
-            startedVirtualMouse = prefs.getBoolean(KEY_STARTED_VIRTUAL_MOUSE, false),
+            configGeneration = prefs.getLong(KEY_CONFIG_GENERATION, 0L),
         )
     }
 
@@ -36,9 +34,6 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             .putBoolean(KEY_HOME_AS_BACK, request.homeAsBack)
             .putBoolean(KEY_COMBO_HOLD_KILL_APP, request.comboHoldKillApp)
             .putBoolean(KEY_VIRTUAL_MOUSE, request.virtualMouse)
-            .putBoolean(KEY_STARTED_HOME_AS_BACK, request.homeAsBack)
-            .putBoolean(KEY_STARTED_COMBO_HOLD_KILL_APP, request.comboHoldKillApp)
-            .putBoolean(KEY_STARTED_VIRTUAL_MOUSE, request.virtualMouse)
             .putBoolean(KEY_EXPECTED_RUNNING, true)
             .putLong(KEY_STARTED_AT, startedAt)
             .apply()
@@ -57,16 +52,20 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
         prefs.edit().putBoolean(KEY_EXPECTED_RUNNING, expectedRunning).apply()
     }
 
-    override fun setHomeAsBackEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_HOME_AS_BACK, enabled).apply()
-    }
+    override fun setHomeAsBackEnabled(enabled: Boolean) = setLiveOption(KEY_HOME_AS_BACK, enabled)
 
-    override fun setComboHoldKillAppEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_COMBO_HOLD_KILL_APP, enabled).apply()
-    }
+    override fun setComboHoldKillAppEnabled(enabled: Boolean) = setLiveOption(KEY_COMBO_HOLD_KILL_APP, enabled)
 
-    override fun setVirtualMouseEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_VIRTUAL_MOUSE, enabled).apply()
+    override fun setVirtualMouseEnabled(enabled: Boolean) = setLiveOption(KEY_VIRTUAL_MOUSE, enabled)
+
+    // Options the running daemon can adopt without being restarted. The generation advances in the
+    // same commit as the value: it is the number the daemon acknowledges once it has adopted the
+    // change, so a value stored without advancing it would be a change nobody ever asks it to make.
+    private fun setLiveOption(key: String, enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(key, enabled)
+            .putLong(KEY_CONFIG_GENERATION, prefs.getLong(KEY_CONFIG_GENERATION, 0L) + 1)
+            .apply()
     }
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {

@@ -47,16 +47,20 @@ internal const val KEY_HOME_AS_BACK = "home_as_back"
 internal const val KEY_COMBO_HOLD_KILL_APP = "combo_hold_kill_app"
 internal const val KEY_VIRTUAL_MOUSE = "virtual_mouse"
 internal const val KEY_AUTO_MIRROR_ENABLED = "auto_mirror_enabled"
-// Flags the running daemon was launched with (see MirrorSettings.startedHomeAsBack docs).
-internal const val KEY_STARTED_HOME_AS_BACK = "started_home_as_back"
-internal const val KEY_STARTED_COMBO_HOLD_KILL_APP = "started_combo_hold_kill_app"
-internal const val KEY_STARTED_VIRTUAL_MOUSE = "started_virtual_mouse"
+// Generation of the live options (see MirrorSettings.configGeneration docs).
+internal const val KEY_CONFIG_GENERATION = "config_generation"
 internal const val KEY_EXPECTED_RUNNING = "expected_running"
 internal const val KEY_STARTED_AT = "started_at"
 internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
+// Line prefix the daemon uses to acknowledge the config it is actually running. Line 1 of the
+// heartbeat stays the timestamp the liveness check reads; everything after is "key value" pairs.
+internal const val GENERATION_PREFIX = "generation "
+// The one command the control fifo carries today. It is a channel rather than a signal precisely so
+// that pause/resume and the mapping wizard's capture mode can join it without new machinery.
+internal const val RELOAD_COMMAND = "reload\n"
 // Give the daemon time to run its cleanup (restore hidden nodes, destroy uinput devices) on SIGTERM
 // before escalating to SIGKILL. 0.5s comfortably covers the restore (a handful of syscalls) even
 // under load, so a stop never orphans a hidden node.

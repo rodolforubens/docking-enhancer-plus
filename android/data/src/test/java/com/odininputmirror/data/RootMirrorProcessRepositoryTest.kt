@@ -8,6 +8,7 @@ import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -128,6 +129,73 @@ class RootMirrorProcessRepositoryTest {
         assertTrue(command.contains("--pid-file '${files.pidFile.absolutePath}'"))
         assertTrue(command.contains("--heartbeat-file '${files.heartbeatFile.absolutePath}'"))
         assertTrue(command.contains("--hidden-state-file '${files.hiddenStateFile.absolutePath}'"))
+        assertTrue(command.contains("--config-file '${files.configFile.absolutePath}'"))
+        assertTrue(command.contains("--control-fifo '${files.controlFifo.absolutePath}'"))
+    }
+
+    @Test
+    fun startWritesTheConfigTheDaemonWillRead() {
+        settings.state = settings.state.copy(configGeneration = 3L)
+
+        repository.start(
+            MirrorStartRequest(
+                source = "/dev/input/event9",
+                target = "/dev/input/event2",
+                homeAsBack = true,
+                comboHoldKillApp = false,
+                virtualMouse = true,
+            )
+        )
+
+        val config = files.configFile.readText()
+        assertTrue(config.contains("\"generation\": 3"))
+        assertTrue(config.contains("\"home_as_back\": true"))
+        assertTrue(config.contains("\"combo_hold_kill_app\": false"))
+        assertTrue(config.contains("\"virtual_mouse\": true"))
+    }
+
+    @Test
+    fun applyLiveSettingsRewritesTheConfigAndAsksForAReload() {
+        var poked: File? = null
+        val reloading = RootMirrorProcessRepository(
+            mirrorSettingsRepository = settings,
+            files = files,
+            shell = shell,
+            nowMillis = { now },
+            procRoot = procRoot,
+            sendReload = { fifo -> poked = fifo; true },
+        )
+
+        val delivered = reloading.applyLiveSettings(
+            MirrorSettings(configGeneration = 9L, homeAsBack = true, virtualMouse = false),
+        )
+
+        assertTrue(delivered)
+        assertEquals(files.controlFifo, poked)
+        val config = files.configFile.readText()
+        assertTrue(config.contains("\"generation\": 9"))
+        assertTrue(config.contains("\"home_as_back\": true"))
+        assertTrue(config.contains("\"virtual_mouse\": false"))
+        // The reload must never travel through PServer: that queue is serialized process-wide, and
+        // keeping a toggle off it is the whole reason the fifo exists.
+        assertTrue(shell.executed.isEmpty())
+    }
+
+    @Test
+    fun appliedConfigGenerationReadsTheDaemonsAcknowledgement() {
+        files.heartbeatFile.writeText("$now\ngeneration 12\n")
+        files.heartbeatFile.setLastModified(now)
+
+        assertEquals(12L, repository.appliedConfigGeneration())
+    }
+
+    @Test
+    fun appliedConfigGenerationIsNullWhenTheDaemonNeverReportedOne() {
+        // A daemon predating the ack: alive and beating, but with nothing to say about its config.
+        files.heartbeatFile.writeText("$now\n")
+        files.heartbeatFile.setLastModified(now)
+
+        assertNull(repository.appliedConfigGeneration())
     }
 
     @Test

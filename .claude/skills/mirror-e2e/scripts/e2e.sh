@@ -232,6 +232,60 @@ else
 fi
 exec 5>&-
 
+# --- T6: hot reload ------------------------------------------------------------------------------
+
+echo ""
+echo "=== T6: cambiar un ajuste no reinicia el daemon ==="
+
+CFG=$TMP/config.json
+FIFO=$TMP/ctl
+rm -f $CFG $FIFO
+mkfifo $FIFO 2>/dev/null
+
+generation() { sed -n 's/^generation //p' $HEART 2>/dev/null; }
+write_config() {
+    printf '{ "generation": %s, "home_as_back": %s, "combo_hold_kill_app": false, "virtual_mouse": false }\n' \
+        "$1" "$2" > $CFG.tmp
+    mv $CFG.tmp $CFG
+}
+# El daemon mantiene el fifo abierto en O_RDWR, asi que siempre hay lector; el timeout esta para que
+# un daemon muerto a mitad del test falle en vez de colgar la suite entera.
+poke() { timeout 2 sh -c "echo reload > $FIFO"; }
+
+write_config 1 false
+start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --hidden-state-file $STATE --heartbeat-file $HEART
+PID_BEFORE=$(mirror_pid)
+if [ -z "$PID_BEFORE" ]; then
+    bad "el daemon arranco para el test de reload"
+else
+    sleep 1.2
+    G=$(generation)
+    if [ "$G" = "1" ]; then ok "adopta la config del arranque"; else bad "no publico la generacion inicial [$G]"; fi
+
+    write_config 2 true
+    poke
+    sleep 1.5
+    G=$(generation)
+    if [ "$G" = "2" ]; then ok "adopta una config nueva sin reiniciar"; else bad "no adopto la generacion 2 [$G]"; fi
+
+    echo '{ roto' > $CFG.tmp && mv $CFG.tmp $CFG
+    poke
+    sleep 1.5
+    G=$(generation)
+    if [ "$G" = "2" ]; then ok "rechaza una config rota y conserva la que corre"; else bad "adopto una config invalida [$G]"; fi
+    expect_contains $LOG "keeping the running config" "y lo dice en el log en vez de fallar en silencio"
+
+    # La asercion que le da sentido a todo el mecanismo: mismo proceso de punta a punta, o sea que el
+    # grab exclusivo nunca se solto y el pad nunca se hizo visible.
+    if [ "$(mirror_pid)" = "$PID_BEFORE" ]; then
+        ok "el pid no cambio en ningun momento (no hubo restart)"
+    else
+        bad "el daemon se reinicio ($PID_BEFORE -> $(mirror_pid))"
+    fi
+    stop_mirror
+fi
+rm -f $CFG $FIFO
+
 # --- teardown ------------------------------------------------------------------------------------
 
 echo ""
