@@ -1,8 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
-#include <linux/uinput.h>
-#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,13 +9,14 @@
 #include <sys/poll.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "capture.h"
 #include "config.h"
+#include "evdev.h"
 #include "hide_nodes.h"
 #include "mapping.h"
+#include "mouse.h"
 
 static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
@@ -27,10 +26,6 @@ static const long long HEARTBEAT_INTERVAL_MS = 1000;
 // its data was cleared, or it is abandoning a duplicate launch), so five seconds of absence is
 // decisive without being twitchy.
 static const int HEARTBEAT_MISSING_LIMIT = 5;
-// Transient write errors to the target (the internal controller, which almost never truly
-// disappears) are retried this many times before giving up — so a momentary hiccup doesn't tear
-// down the whole mirror.
-static const int TARGET_WRITE_RETRIES = 3;
 
 // Events pulled from the source in a single read(). evdev returns whole events only, so one read
 // coalesces a frame's worth of axis+button+SYN events instead of one syscall each. 32 is ample —
@@ -38,18 +33,10 @@ static const int TARGET_WRITE_RETRIES = 3;
 #define EVENT_BATCH_SIZE 32
 
 // Virtual mouse mode (opt-in via --virtual-mouse). Select+R3 held this long toggles the mode; while
-// on, the grabbed controller drives a self-created uinput pointer instead of the target node.
+// on, the grabbed controller drives a self-created uinput pointer instead of the target node. The
+// pointer itself lives in mouse.c; what stays here is the combo that summons it and the shell
+// command it occasionally asks for.
 static const long long MOUSE_TOGGLE_HOLD_MS = 500;
-static const long long MOUSE_FRAME_INTERVAL_MS = 12; // ~83 Hz cursor/scroll updates
-static const double MOUSE_SPEED = 18.0;              // max cursor pixels per frame at full deflection
-static const double MOUSE_DEADZONE = 0.18;           // fraction of stick travel ignored around center
-static const double WHEEL_STEP_PER_FRAME = 0.30;     // scroll clicks accumulated per frame at full deflection
-// Android only paints the pointer once it receives real motion, so entering mouse mode used to leave
-// the cursor invisible until the stick was moved. We can't just emit one nudge on entry either: the
-// uinput device was created microseconds ago and the framework still has to notice it via inotify
-// and open it, so anything written before that is dropped. Instead nudge on every idle frame for
-// this long, which covers the open latency and stops as soon as the window closes.
-static const long long CURSOR_SHOW_NUDGE_MS = 300;
 
 /*
  * In Odin mode we remap the four face buttons of a mirrored external controller to the
@@ -124,57 +111,6 @@ static void run_detached(const char *command) {
     // Parent: with SIGCHLD ignored (set in main) the child is auto-reaped; never wait on it.
 }
 
-static int write_full(int fd, const void *buffer, size_t length) {
-    const unsigned char *cursor = (const unsigned char *)buffer;
-    size_t remaining = length;
-
-    while (remaining > 0) {
-        ssize_t written = write(fd, cursor, remaining);
-        if (written < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-
-        if (written == 0) {
-            errno = EIO;
-            return -1;
-        }
-
-        cursor += written;
-        remaining -= (size_t)written;
-    }
-
-    return 0;
-}
-
-// Write one input_event to fd. Used for the uinput mouse and for target neutralisation.
-static int emit_event(int fd, unsigned short type, unsigned short code, int value) {
-    struct input_event event;
-    memset(&event, 0, sizeof(event));
-    event.type = type;
-    event.code = code;
-    event.value = value;
-    return write_full(fd, &event, sizeof(event));
-}
-
-// Write one forwarded event to the target, tolerating a transient failure. write_full already
-// retries EINTR; here we retry the whole write a few times with a short backoff so a momentary
-// target error (the internal controller briefly busy) doesn't break the mirror loop. Gives up —
-// returning -1 — only if it keeps failing, at which point the target is likely genuinely gone.
-static int write_event_tolerant(int fd, const struct input_event *event) {
-    for (int attempt = 0; ; attempt++) {
-        if (write_full(fd, event, sizeof(*event)) == 0) {
-            return 0;
-        }
-        if (attempt >= TARGET_WRITE_RETRIES) {
-            return -1;
-        }
-        usleep(2000);
-    }
-}
-
 static int is_home_button(unsigned short code) {
 #ifdef KEY_HOMEPAGE
     if (code == KEY_HOMEPAGE) {
@@ -222,15 +158,6 @@ static int is_start_button(unsigned short code) {
     return code == 315;
 }
 
-static long long now_ms(void) {
-    struct timespec current_time;
-    if (clock_gettime(CLOCK_MONOTONIC, &current_time) != 0) {
-        return 0;
-    }
-
-    return ((long long)current_time.tv_sec * 1000LL) + ((long long)current_time.tv_nsec / 1000000LL);
-}
-
 static void force_stop_foreground_app(void) {
     run_detached(
         "pkg=$(dumpsys activity activities 2>/dev/null | sed -n 's/.*ResumedActivity: ActivityRecord{[^ ]* [^ ]* \\([^/ ]*\\)\\/.*/\\1/p' | head -n 1); "
@@ -262,12 +189,16 @@ static int write_pid_file(const char *pid_file_path) {
 
 // Open the heartbeat file once, to be rewritten in place for the life of the run. Keeping the fd
 // avoids an open/close pair every second in the mirror loop.
-static int open_heartbeat_file(const char *heartbeat_file_path) {
+//
+// `create` is false for every reopen after the first: the file's absence is how the app orders this
+// daemon to stop, so only the opening beat may bring it into existence.
+static int open_heartbeat_file(const char *heartbeat_file_path, int create) {
     if (heartbeat_file_path == NULL) {
         return -1;
     }
 
-    int fd = open(heartbeat_file_path, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    int flags = O_WRONLY | O_CLOEXEC | (create ? O_CREAT : 0);
+    int fd = open(heartbeat_file_path, flags, 0644);
     if (fd < 0) {
         fprintf(stderr, "Failed to open heartbeat file %s: %s\n", heartbeat_file_path, strerror(errno));
         return -1;
@@ -276,15 +207,6 @@ static int open_heartbeat_file(const char *heartbeat_file_path) {
     chmod(heartbeat_file_path, 0644);
     return fd;
 }
-
-// One analog axis of the source controller, normalised so deflection reads as [-1, 1].
-struct axis {
-    unsigned short code;
-    int present;
-    int center;
-    int half_range;
-    int raw; // last raw value seen
-};
 
 // Record every absolute axis a device declares, with its travel, so a remapped axis can be rescaled
 // between the two controllers. Asked once per device at startup: the source is grabbed straight
@@ -319,186 +241,12 @@ static void query_axis_ranges(int fd, struct axis_range *out) {
     }
 }
 
-// Populate an axis from EVIOCGABS. present stays 0 if the source lacks it or reports a null range.
-static void query_axis(int source_fd, struct axis *axis, unsigned short code) {
-    struct input_absinfo info;
-    axis->code = code;
-    axis->present = 0;
-    axis->center = 0;
-    axis->half_range = 1;
-    axis->raw = 0;
-    if (ioctl(source_fd, EVIOCGABS(code), &info) == 0 && info.maximum > info.minimum) {
-        axis->present = 1;
-        axis->center = (info.maximum + info.minimum) / 2;
-        axis->half_range = (info.maximum - info.minimum) / 2;
-        if (axis->half_range < 1) {
-            axis->half_range = 1;
-        }
-        axis->raw = info.value;
-    }
-}
-
-// Normalise raw deflection to [-1, 1], apply the deadzone, and square the magnitude for finer
-// control near center. Returns 0 inside the deadzone.
-static double axis_normalised(const struct axis *axis) {
-    if (!axis->present || axis->half_range < 1) {
-        return 0.0;
-    }
-    double n = (double)(axis->raw - axis->center) / (double)axis->half_range;
-    if (n > 1.0) n = 1.0;
-    if (n < -1.0) n = -1.0;
-    if (fabs(n) < MOUSE_DEADZONE) {
-        return 0.0;
-    }
-    double sign = n < 0 ? -1.0 : 1.0;
-    double mag = (fabs(n) - MOUSE_DEADZONE) / (1.0 - MOUSE_DEADZONE);
-    return sign * mag * mag;
-}
-
-// Create a uinput relative pointer (mouse). Returns the fd, or -1 on failure.
-static int create_uinput_mouse(void) {
-    int fd = open("/dev/uinput", O_RDWR | O_CLOEXEC | O_NONBLOCK);
-    if (fd < 0) {
-        fprintf(stderr, "open /dev/uinput failed: %s\n", strerror(errno));
-        return -1;
-    }
-
-    if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0 ||
-        ioctl(fd, UI_SET_KEYBIT, BTN_LEFT) < 0 ||
-        ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT) < 0 ||
-        ioctl(fd, UI_SET_EVBIT, EV_REL) < 0 ||
-        ioctl(fd, UI_SET_RELBIT, REL_X) < 0 ||
-        ioctl(fd, UI_SET_RELBIT, REL_Y) < 0 ||
-        ioctl(fd, UI_SET_RELBIT, REL_WHEEL) < 0) {
-        fprintf(stderr, "UI_SET_*BIT failed: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    struct uinput_setup setup;
-    memset(&setup, 0, sizeof(setup));
-    setup.id.bustype = BUS_VIRTUAL;
-    setup.id.vendor = 0x2323;
-    setup.id.product = 0x0001;
-    setup.id.version = 1;
-    snprintf(setup.name, sizeof(setup.name), "Docking Enhancer Mouse");
-
-    if (ioctl(fd, UI_DEV_SETUP, &setup) < 0) {
-        fprintf(stderr, "UI_DEV_SETUP failed: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-    if (ioctl(fd, UI_DEV_CREATE) < 0) {
-        fprintf(stderr, "UI_DEV_CREATE failed: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-/*
- * A uinput touchscreen we keep alongside the mouse while in mouse mode, used to hide the cursor
- * instantly on the way out.
- *
- * Destroying our pointer isn't enough to hide the cursor: the Odin's own always-connected "ODIN
- * Station Virtual Mouse" keeps Android in "a mouse is present" state, so the cursor only fades after
- * its ~3s inactivity timeout. Android *does* hide it at once the moment a touch arrives (input
- * switches to touch mode). We create this device when ENTERING mouse mode so Android has fully
- * enumerated and opened it by the time we need it (a device created and used within the same
- * instant is never read — enumeration takes ~100ms+). On leaving mouse mode we push one touch-DOWN
- * through it and then destroy it mid-gesture: Android switches to touch mode (cursor hidden
- * immediately) and cancels the orphaned touch, so no tap/click is ever dispatched.
- */
-static int create_touch_device(void) {
-    int fd = open("/dev/uinput", O_RDWR | O_CLOEXEC | O_NONBLOCK);
-    if (fd < 0) {
-        return -1;
-    }
-
-    ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
-    ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
-    ioctl(fd, UI_SET_EVBIT, EV_ABS);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_SLOT);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-
-    struct uinput_abs_setup abs;
-    memset(&abs, 0, sizeof(abs));
-    abs.code = ABS_MT_SLOT;
-    abs.absinfo.maximum = 9;
-    ioctl(fd, UI_ABS_SETUP, &abs);
-    abs.code = ABS_MT_TRACKING_ID;
-    abs.absinfo.maximum = 65535;
-    ioctl(fd, UI_ABS_SETUP, &abs);
-    abs.code = ABS_MT_POSITION_X;
-    abs.absinfo.maximum = 32767;
-    ioctl(fd, UI_ABS_SETUP, &abs);
-    abs.code = ABS_MT_POSITION_Y;
-    abs.absinfo.maximum = 32767;
-    ioctl(fd, UI_ABS_SETUP, &abs);
-
-    struct uinput_setup setup;
-    memset(&setup, 0, sizeof(setup));
-    setup.id.bustype = BUS_VIRTUAL;
-    setup.id.vendor = 0x2323;
-    setup.id.product = 0x0002;
-    setup.id.version = 1;
-    // A real name is required or Android/the firmware ignores the device (the touch never registers
-    // and the cursor won't hide). Because a named device unavoidably pops a "<name> connected" toast,
-    // the name is chosen so that toast reads as an intentional mirror-activation message. The device
-    // is created once per mirror start and kept for the whole session, so the toast shows once on
-    // start (not on every mouse-mode toggle).
-    snprintf(setup.name, sizeof(setup.name), "Docking Enhancer Mirror");
-
-    if (ioctl(fd, UI_DEV_SETUP, &setup) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-// Push a touch-DOWN through the persistent touch device to switch Android into touch mode (hiding
-// the mouse cursor immediately), then cancel the gesture so it is never completed as a tap/click —
-// without destroying the device (which would re-trigger a "connected" toast on the next use).
-//
-// The cancel uses SYN_DROPPED: after the DOWN we set the device's state back to "no touch" but,
-// instead of reporting it normally (which would be a tap), we emit SYN_DROPPED. Android's EventHub
-// treats that as a lost-sync signal, discards the in-flight packet, re-reads the device state (now
-// released) and cancels the active touch — no ACTION_UP, so nothing is clicked.
-static void flush_touch_cancel(int touch_fd) {
-    if (touch_fd < 0) {
-        return;
-    }
-    // Touch DOWN at (0,0): coordinate is irrelevant because the gesture is cancelled.
-    emit_event(touch_fd, EV_ABS, ABS_MT_SLOT, 0);
-    emit_event(touch_fd, EV_ABS, ABS_MT_TRACKING_ID, 1);
-    emit_event(touch_fd, EV_ABS, ABS_MT_POSITION_X, 0);
-    emit_event(touch_fd, EV_ABS, ABS_MT_POSITION_Y, 0);
-    emit_event(touch_fd, EV_KEY, BTN_TOUCH, 1);
-    emit_event(touch_fd, EV_SYN, SYN_REPORT, 0);
-
-    // Let Android read the DOWN (switch to touch mode → cursor hidden) before we cancel.
-    usleep(40000);
-
-    // Release the contact in the device state, then signal a dropped sync so Android discards this
-    // packet and re-reads the (released) state as a cancel rather than a tap.
-    emit_event(touch_fd, EV_ABS, ABS_MT_SLOT, 0);
-    emit_event(touch_fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
-    emit_event(touch_fd, EV_KEY, BTN_TOUCH, 0);
-    emit_event(touch_fd, EV_SYN, SYN_DROPPED, 0);
-    emit_event(touch_fd, EV_SYN, SYN_REPORT, 0);
-}
-
 // All state carried across mirror-loop iterations: the fds, the option flags, and the runtime state
 // for the kill-app combo, the heartbeat, and virtual-mouse mode. Grouping it keeps the loop body a
 // readable dispatcher and lets each feature live in its own handler.
 struct mirror_state {
     int source_fd;
     int target_fd;
-    int uinput_fd;  // virtual-mouse pointer (created on entering mouse mode)
-    int touch_fd;   // cursor-hiding touch helper (created once per run)
     int control_fd; // command fifo the app pokes to ask for a config reload
 
     // Generation of the config currently in force, echoed in the heartbeat so the app can tell an
@@ -507,6 +255,7 @@ struct mirror_state {
 
     const char *heartbeat_file_path;
     int heartbeat_fd;  // held open for the whole run; rewritten in place each beat
+    int heartbeat_created;  // the opening beat made the file; later reopens must never re-create it
     int heartbeat_missing_beats;  // consecutive beats the heartbeat PATH has been gone
     int home_as_back;
     int combo_hold_kill_app;
@@ -526,19 +275,12 @@ struct mirror_state {
 
     long long last_heartbeat_ms;
 
-    // Virtual-mouse runtime state.
-    int mouse_mode;
+    // The pointer, when the user has summoned it. Owned by mouse.c: what is left here is only the
+    // combo that toggles it and the one thing it cannot do for itself.
+    struct mouse_state mouse;
     int mouse_combo_triggered;
     long long mouse_combo_pressed_at_ms;
-    long long last_frame_ms;
-    long long cursor_nudge_until_ms; // keep jiggling the pointer until this instant so it shows up
-    double residual_x;  // carry sub-pixel cursor motion between frames
-    double residual_y;
-    double wheel_accum; // carry sub-click scroll between frames
-    int left_click_down;
-    int right_click_down;
-    int shade_open;     // our view of whether R1 last opened the notification shade
-    struct axis left_x, left_y, right_x, right_y;
+    int shade_open;  // our view of whether R1 last opened the notification shade
 
     // The mapping wizard's capture step, when one is open. While it is, nothing is forwarded.
     struct capture capture;
@@ -567,8 +309,16 @@ static void write_heartbeat(struct mirror_state *s) {
     if (s->heartbeat_file_path == NULL) {
         return;
     }
-    if (s->heartbeat_fd < 0) {
-        s->heartbeat_fd = open_heartbeat_file(s->heartbeat_file_path);
+    // Only the FIRST beat is allowed to create the file. After that its absence is the app's way of
+    // saying this daemon should be gone, and re-creating it would be us answering our own summons:
+    // a write error drops the fd below, and a reopen with O_CREAT on the next beat would put back the
+    // very file the app had just deleted, reset the counter, and leave a root daemon holding the
+    // user's controller with nothing left to stop it.
+    if (s->heartbeat_fd < 0 && !s->heartbeat_created) {
+        s->heartbeat_fd = open_heartbeat_file(s->heartbeat_file_path, 1);
+        if (s->heartbeat_fd >= 0) {
+            s->heartbeat_created = 1;
+        }
     }
 
     // Owner watchdog. Deliberately tests the PATH, never the fd: unlinking a file does not disturb an
@@ -576,7 +326,7 @@ static void write_heartbeat(struct mirror_state *s) {
     // nobody can reach — grabbing the user's controller and keeping its node hidden with no app left
     // to stop or heal it. The app deletes this path only when it wants this daemon gone, so treat a
     // sustained absence as our cue to leave through the normal shutdown, which restores what we hid.
-    // Placed after the open above so the first beat CREATES the file instead of tripping on it.
+    // Placed after the create above so the first beat makes the file instead of tripping on it.
     if (access(s->heartbeat_file_path, F_OK) != 0) {
         if (++s->heartbeat_missing_beats >= HEARTBEAT_MISSING_LIMIT) {
             fprintf(stderr, "heartbeat file %s missing for %d beats; shutting down\n",
@@ -587,8 +337,14 @@ static void write_heartbeat(struct mirror_state *s) {
     }
     s->heartbeat_missing_beats = 0;
 
+    // A previous write failed and dropped the fd. The file is still there — the access() above just
+    // proved it — so take it back WITHOUT O_CREAT, which keeps the recovery from doubling as a way to
+    // resurrect a heartbeat the app deleted between the two checks.
     if (s->heartbeat_fd < 0) {
-        return;
+        s->heartbeat_fd = open_heartbeat_file(s->heartbeat_file_path, 0);
+        if (s->heartbeat_fd < 0) {
+            return;
+        }
     }
 
     // Line 1 stays exactly the timestamp: the app judges liveness by this file's mtime and
@@ -614,67 +370,15 @@ static void write_heartbeat(struct mirror_state *s) {
     }
 }
 
-// Poll timeout for the next iteration: fast while a hold combo is pending (to catch the threshold
-// without new events) or in mouse mode (frame cadence), otherwise idle at 1s (heartbeat rate).
-static int compute_loop_timeout(const struct mirror_state *s) {
-    int timeout_ms = 1000;
-    if (s->mouse_mode) {
-        timeout_ms = (int)MOUSE_FRAME_INTERVAL_MS;
-    } else if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered) {
-        timeout_ms = 50;
-    }
-    if (s->virtual_mouse && s->select_pressed && s->thumbr_pressed && !s->mouse_combo_triggered && timeout_ms > 50) {
-        timeout_ms = 50;
-    }
-    return timeout_ms;
-}
-
-// Emit accumulated cursor/scroll motion on the frame cadence. A moving stick streams ABS events so
-// poll rarely times out; the time gate throttles the actual emit rate to ~83 Hz either way.
-static void emit_mouse_frame(struct mirror_state *s) {
-    long long tick = now_ms();
-    if (tick - s->last_frame_ms < MOUSE_FRAME_INTERVAL_MS) {
-        return;
-    }
-    s->last_frame_ms = tick;
-    s->residual_x += axis_normalised(&s->left_x) * MOUSE_SPEED;
-    s->residual_y += axis_normalised(&s->left_y) * MOUSE_SPEED;
-    int dx = (int)s->residual_x;
-    int dy = (int)s->residual_y;
-    s->residual_x -= dx;
-    s->residual_y -= dy;
-
-    // Scroll: right stick up scrolls up (positive wheel). Stick up reads negative, so invert Y.
-    s->wheel_accum += (-axis_normalised(&s->right_y)) * WHEEL_STEP_PER_FRAME;
-    int wheel = (int)s->wheel_accum;
-    s->wheel_accum -= wheel;
-
-    if (dx != 0 || dy != 0 || wheel != 0) {
-        if (dx != 0) emit_event(s->uinput_fd, EV_REL, REL_X, dx);
-        if (dy != 0) emit_event(s->uinput_fd, EV_REL, REL_Y, dy);
-        if (wheel != 0) emit_event(s->uinput_fd, EV_REL, REL_WHEEL, wheel);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-    } else if (tick < s->cursor_nudge_until_ms) {
-        // Idle inside the reveal window: step one pixel out and straight back, as two separate
-        // reports. Each is real motion so the framework paints (and keeps) the pointer, while the
-        // pair nets to zero, leaving the cursor exactly where the user last had it.
-        emit_event(s->uinput_fd, EV_REL, REL_X, 1);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-        emit_event(s->uinput_fd, EV_REL, REL_X, -1);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-    }
-}
-
-// Enter mouse mode: create the pointer, then release everything the target believes held (every key
-// forwarded as down and every axis away from its rest value) so the game sees no stuck buttons or
-// deflected sticks while we stop forwarding. On creation failure, stay in gamepad mode.
-static void enter_mouse_mode(struct mirror_state *s) {
-    s->uinput_fd = create_uinput_mouse();
-    if (s->uinput_fd < 0) {
-        fprintf(stderr, "Virtual mouse: could not create uinput device; staying in gamepad mode\n");
-        return;
-    }
-    s->mouse_mode = 1;
+/*
+ * Release everything the TARGET currently believes held, before the pointer takes over.
+ *
+ * Mirror-side, not mouse-side: these shadows are what the forwarding path recorded on its way past,
+ * and only it knows what it has told the target. Once mouse mode starts nothing is forwarded, so a
+ * key still down here — or a stick still deflected — would stay that way for as long as the pointer
+ * is up, and the game underneath would sit there holding a direction nobody is pressing.
+ */
+static void release_target_holds(struct mirror_state *s) {
     for (int code = 0; code < KEY_CNT; code++) {
         if (s->key_down[code]) {
             emit_event(s->target_fd, EV_KEY, (unsigned short)code, 0);
@@ -688,27 +392,36 @@ static void enter_mouse_mode(struct mirror_state *s) {
         }
     }
     emit_event(s->target_fd, EV_SYN, SYN_REPORT, 0);
-    s->residual_x = s->residual_y = s->wheel_accum = 0.0;
-    s->left_click_down = s->right_click_down = 0;
-    s->shade_open = 0;
-    s->last_frame_ms = now_ms();
-    s->cursor_nudge_until_ms = s->last_frame_ms + CURSOR_SHOW_NUDGE_MS;
 }
 
-// Leave mouse mode: release held clicks, destroy the pointer (so Android drops the on-screen cursor)
-// and flush the touch helper to hide the cursor immediately instead of waiting for its fade.
-static void leave_mouse_mode(struct mirror_state *s) {
-    s->mouse_mode = 0;
-    if (s->uinput_fd >= 0) {
-        if (s->left_click_down) emit_event(s->uinput_fd, EV_KEY, BTN_LEFT, 0);
-        if (s->right_click_down) emit_event(s->uinput_fd, EV_KEY, BTN_RIGHT, 0);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-        ioctl(s->uinput_fd, UI_DEV_DESTROY);
-        close(s->uinput_fd);
-        s->uinput_fd = -1;
+// Hand control to the pointer, then quiesce the target — in that order, because a pointer that fails
+// to come up leaves us in gamepad mode with everything still forwarding, and releasing the user's
+// held buttons on the way to not changing anything would be a visible glitch for no reason.
+static void enter_mouse_mode(struct mirror_state *s) {
+    if (mouse_enter(&s->mouse) != 0) {
+        return;
     }
-    s->left_click_down = s->right_click_down = 0;
-    flush_touch_cancel(s->touch_fd);
+    release_target_holds(s);
+    s->shade_open = 0;
+}
+
+static void leave_mouse_mode(struct mirror_state *s) {
+    mouse_leave(&s->mouse);
+}
+
+// Poll timeout for the next iteration: fast while a hold combo is pending (to catch the threshold
+// without new events) or in mouse mode (frame cadence), otherwise idle at 1s (heartbeat rate).
+static int compute_loop_timeout(const struct mirror_state *s) {
+    int timeout_ms = 1000;
+    if (s->mouse.mode) {
+        timeout_ms = (int)MOUSE_FRAME_INTERVAL_MS;
+    } else if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered) {
+        timeout_ms = 50;
+    }
+    if (s->virtual_mouse && s->select_pressed && s->thumbr_pressed && !s->mouse_combo_triggered && timeout_ms > 50) {
+        timeout_ms = 50;
+    }
+    return timeout_ms;
 }
 
 /*
@@ -723,7 +436,7 @@ static void leave_mouse_mode(struct mirror_state *s) {
  */
 static void apply_config(struct mirror_state *s, const struct config *next) {
     if (s->virtual_mouse && !next->virtual_mouse) {
-        if (s->mouse_mode) {
+        if (s->mouse.mode) {
             leave_mouse_mode(s);
         }
         s->mouse_combo_triggered = 0;
@@ -793,7 +506,7 @@ static void maybe_toggle_mouse_mode(struct mirror_state *s) {
         return;
     }
     s->mouse_combo_triggered = 1;
-    if (!s->mouse_mode) {
+    if (!s->mouse.mode) {
         enter_mouse_mode(s);
     } else {
         leave_mouse_mode(s);
@@ -876,35 +589,6 @@ static void handle_kill_combo_event(struct mirror_state *s, const struct input_e
     if (ev->value == 0 && !s->select_pressed && !s->start_pressed) {
         s->combo_triggered = 0;
         s->combo_pressed_at_ms = 0;
-    }
-}
-
-// In mouse mode the source drives the pointer instead of the target: track stick positions (motion
-// is emitted on the frame cadence), map A/B to clicks, and R1 to the notification shade.
-static void handle_mouse_event(struct mirror_state *s, const struct input_event *ev) {
-    if (ev->type == EV_ABS) {
-        if (ev->code == s->left_x.code && s->left_x.present) s->left_x.raw = ev->value;
-        else if (ev->code == s->left_y.code && s->left_y.present) s->left_y.raw = ev->value;
-        else if (ev->code == s->right_x.code && s->right_x.present) s->right_x.raw = ev->value;
-        else if (ev->code == s->right_y.code && s->right_y.present) s->right_y.raw = ev->value;
-    } else if (ev->type == EV_KEY && ev->code == BTN_SOUTH) {
-        s->left_click_down = ev->value ? 1 : 0;
-        emit_event(s->uinput_fd, EV_KEY, BTN_LEFT, s->left_click_down);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-    } else if (ev->type == EV_KEY && ev->code == BTN_EAST) {
-        s->right_click_down = ev->value ? 1 : 0;
-        emit_event(s->uinput_fd, EV_KEY, BTN_RIGHT, s->right_click_down);
-        emit_event(s->uinput_fd, EV_SYN, SYN_REPORT, 0);
-    } else if (ev->type == EV_KEY && ev->code == BTN_TR && ev->value == 1) {
-        // R1 toggles Android's notification shade (a mouse can't drag it down). Commands are
-        // idempotent enough that a stale shade_open just costs one extra press.
-        if (s->shade_open) {
-            run_detached("cmd statusbar collapse");
-            s->shade_open = 0;
-        } else {
-            run_detached("cmd statusbar expand-notifications");
-            s->shade_open = 1;
-        }
     }
 }
 
@@ -1049,8 +733,7 @@ int main(int argc, char **argv) {
 
     struct mirror_state s;
     memset(&s, 0, sizeof(s));
-    s.uinput_fd = -1;
-    s.touch_fd = -1;
+    mouse_init(&s.mouse);
     s.control_fd = -1;
     s.heartbeat_fd = -1;
     s.heartbeat_file_path = heartbeat_file_path;
@@ -1059,7 +742,6 @@ int main(int argc, char **argv) {
     s.virtual_mouse = virtual_mouse;
     s.capture.first_axis = -1;
     s.capture.log_path = capture_file_path;
-    s.last_frame_ms = now_ms();
 
     s.source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
     if (s.source_fd < 0) {
@@ -1081,24 +763,15 @@ int main(int argc, char **argv) {
             target_id.product == ODIN_NINTENDO_PRODUCT_ID;
     }
 
-    // Virtual mouse setup: resolve which axes to read. Left stick (ABS_X/ABS_Y) is universal; the
-    // right stick used for scroll varies, so probe ABS_RX/RY and fall back to ABS_Z/RZ (e.g. 8BitDo
-    // exposes the right stick as ABS_Z/ABS_RZ). The abs_* arrays capture the source's rest state so
-    // entering mouse mode can neutralise a held trigger/stick (enter_mouse_mode): a trigger's rest
-    // value is its minimum, so a sampled-at-startup neutral avoids half-pressing it.
+    // Virtual mouse setup: resolve which source axes drive the pointer, and capture the source's rest
+    // state so release_target_holds can neutralise a held trigger/stick — a trigger's rest value is
+    // its minimum, so a sampled-at-startup neutral avoids half-pressing it.
     //
     // Done unconditionally, even with the virtual mouse off. The setting can now be turned ON at
     // runtime through a config reload, and by then this is the only chance we had to read the
     // source's axis map — the pad is grabbed and its rest values long since moved.
     {
-        query_axis(s.source_fd, &s.left_x, ABS_X);
-        query_axis(s.source_fd, &s.left_y, ABS_Y);
-        query_axis(s.source_fd, &s.right_x, ABS_RX);
-        query_axis(s.source_fd, &s.right_y, ABS_RY);
-        if (!s.right_x.present || !s.right_y.present) {
-            query_axis(s.source_fd, &s.right_x, ABS_Z);
-            query_axis(s.source_fd, &s.right_y, ABS_RZ);
-        }
+        mouse_bind_source_axes(&s.mouse, s.source_fd);
 
         unsigned long abs_bits[(ABS_CNT + 8 * sizeof(unsigned long) - 1) / (8 * sizeof(unsigned long))];
         memset(abs_bits, 0, sizeof(abs_bits));
@@ -1147,13 +820,13 @@ int main(int argc, char **argv) {
     // what hides the cursor on mouse-mode exit when enabled, and its unavoidable "connected" toast
     // ("Docking Enhancer Mirror connected") doubles as a consistent mirror-activation notification on
     // each start. Created once and kept for the whole session so the toast doesn't repeat per toggle.
-    s.touch_fd = create_touch_device();
+    mouse_create_touch_device(&s.mouse);
 
     if (ioctl(s.source_fd, EVIOCGRAB, 1) < 0) {
         fprintf(stderr, "Failed to grab source %s: %s\n", source_path, strerror(errno));
-        if (s.touch_fd >= 0) {
-            ioctl(s.touch_fd, UI_DEV_DESTROY);
-            close(s.touch_fd);
+        mouse_destroy(&s.mouse);
+        if (s.control_fd >= 0) {
+            close(s.control_fd);
         }
         close(s.target_fd);
         close(s.source_fd);
@@ -1192,8 +865,8 @@ int main(int argc, char **argv) {
             s.last_heartbeat_ms = heartbeat_now_ms;
         }
 
-        if (s.mouse_mode) {
-            emit_mouse_frame(&s);
+        if (s.mouse.mode) {
+            mouse_emit_frame(&s.mouse);
         }
 
         // Watch the source and the control fifo together. Adding the fifo here rather than checking
@@ -1316,8 +989,15 @@ int main(int argc, char **argv) {
 
             handle_kill_combo_event(&s, event);
 
-            if (s.mouse_mode) {
-                handle_mouse_event(&s, event);
+            if (s.mouse.mode) {
+                // The pointer reports back what it cannot do itself. R1 asks for the notification
+                // shade because a mouse has no way to drag it down; the commands are idempotent
+                // enough that a stale view of it just costs the user one extra press.
+                if (mouse_handle_event(&s.mouse, event) == MOUSE_ACTION_TOGGLE_SHADE) {
+                    run_detached(s.shade_open ? "cmd statusbar collapse"
+                                              : "cmd statusbar expand-notifications");
+                    s.shade_open = !s.shade_open;
+                }
                 continue;
             }
 
@@ -1353,20 +1033,13 @@ int main(int argc, char **argv) {
 
     // Shut mouse mode down the same way the user's own toggle does. Destroying the pointer device
     // is not enough on its own: Android goes on drawing the cursor until it fades, so stopping the
-    // mirror from within mouse mode used to strand it on screen. leave_mouse_mode also flushes the
-    // touch helper, which is what actually takes it away — hence this runs while touch_fd is still
-    // alive, and before the plain destroy below (which is then a no-op).
-    if (s.mouse_mode) {
+    // mirror from within mouse mode used to strand it on screen. mouse_leave also flushes the touch
+    // helper, which is what actually takes it away — hence this runs while that helper is still
+    // alive, and before mouse_destroy below (which is then only cleaning up the helper itself).
+    if (s.mouse.mode) {
         leave_mouse_mode(&s);
     }
-    if (s.uinput_fd >= 0) {
-        ioctl(s.uinput_fd, UI_DEV_DESTROY);
-        close(s.uinput_fd);
-    }
-    if (s.touch_fd >= 0) {
-        ioctl(s.touch_fd, UI_DEV_DESTROY);
-        close(s.touch_fd);
-    }
+    mouse_destroy(&s.mouse);
     if (s.control_fd >= 0) {
         close(s.control_fd);
     }

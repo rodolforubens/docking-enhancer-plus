@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // Largest config file we will read. The document is a handful of flags written by the app; anything
@@ -219,6 +220,18 @@ int open_control_fifo(const char *path) {
     int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         fprintf(stderr, "control: cannot open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    // It has to actually BE a fifo. A regular file at this path reports POLLIN forever and never
+    // yields anything to read, which would spin this loop at full speed — on a niced root process
+    // holding an exclusive grab on the user's controller. The app creates the fifo and replaces
+    // anything that isn't one, so this is the daemon refusing to depend on that being true.
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode)) {
+        fprintf(stderr, "control: %s is not a fifo; running without a control channel\n", path);
+        close(fd);
+        return -1;
     }
     return fd;
 }

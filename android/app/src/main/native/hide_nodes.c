@@ -30,7 +30,21 @@ int count_active_hidden(const struct hidden_node *nodes, int count) {
 // device number so restore_hidden_nodes can recreate the node on exit.
 void hide_node(const char *path, struct hidden_node *slot, unsigned short expected_vendor) {
     memset(slot, 0, sizeof(*slot));
-    snprintf(slot->path, sizeof(slot->path), "%s", path);
+    // Refuse anything we could not record verbatim. unlink() below would take the FULL path while the
+    // state file kept a truncated one, so the node would go away and no restore — not on exit, not on
+    // a later heal — could ever name it again. A /dev/input path never comes close to this, which is
+    // exactly why the invariant is worth asserting rather than assuming.
+    int written = snprintf(slot->path, sizeof(slot->path), "%s", path);
+    if (written < 0 || (size_t)written >= sizeof(slot->path)) {
+        fprintf(stderr, "hide: path too long to record, refusing: %s\n", path);
+        return;
+    }
+    // A space would come back as two fields from the state file's scanner and strand the node the
+    // same way. Also impossible for /dev/input/eventNN, also cheap to rule out.
+    if (strchr(path, ' ') != NULL || strchr(path, '\n') != NULL) {
+        fprintf(stderr, "hide: path is not recordable, refusing: %s\n", path);
+        return;
+    }
 
     // Verify identity before unlinking. Event numbers renumber across reconnects, so between the app
     // resolving this path and us acting on it the node could point to a DIFFERENT device. Open it,
@@ -67,7 +81,13 @@ void hide_node(const char *path, struct hidden_node *slot, unsigned short expect
 // SELinux label and hardlinked in: EventHub opens it on the resulting IN_CREATE, and a label set
 // only after the node appears would lose that race and the device would never be listed.
 void restore_hidden_nodes(struct hidden_node *nodes, int count) {
-    const char *tmp = "/dev/.input_mirror_restore";
+    // Per-process staging name. A shared constant meant a shutting-down daemon and a concurrent
+    // `--heal` could collide: one's unlink(tmp) removes the node the other had just mknod'd, between
+    // its mknod and its link, and that node is then lost with no name left to restore it by. The
+    // supervisor is built to keep those two apart; this makes the collision impossible rather than
+    // merely unlikely.
+    char tmp[64];
+    snprintf(tmp, sizeof(tmp), "/dev/.input_mirror_restore.%d", (int)getpid());
     const char *ctx = "u:object_r:input_device:s0";
     for (int i = 0; i < count; i++) {
         struct hidden_node *n = &nodes[i];
