@@ -22,9 +22,31 @@ if (-not (Test-Path $Clang)) {
 
 New-Item -ItemType Directory -Force -Path $AssetDir | Out-Null
 
-& $Clang -O3 -Wall -Wextra -std=c11 -D_GNU_SOURCE @Sources -o $Output
+# -Werror because the artifact this produces is COMMITTED: a warning introduced in a change is
+# invisible to anyone who doesn't happen to run this script, so the build has to be the thing that
+# refuses. The hardening flags are not optional for a process that runs as root holding an exclusive
+# grab on the user's controller — stack canaries, fortified libc calls, and a relocation table that
+# is read-only by the time main() starts.
+$CFlags = @(
+    "-O3", "-Wall", "-Wextra", "-Werror", "-std=c11", "-D_GNU_SOURCE",
+    "-D_FORTIFY_SOURCE=2",
+    "-fstack-protector-strong",
+    "-fPIE",
+    "-Wl,-pie",
+    "-Wl,-z,relro",
+    "-Wl,-z,now",
+    "-Wl,-z,noexecstack"
+)
+
+& $Clang @CFlags @Sources -o $Output
 if ($LASTEXITCODE -ne 0) {
     throw "NDK build failed with exit code $LASTEXITCODE"
 }
 
+# Recorded next to the binary so a reviewer can tell at a glance whether the committed artifact is
+# the one these sources produce. Checked by scripts/check-input-mirror-sync.ps1.
+$Hash = (Get-FileHash -Algorithm SHA256 -Path $Output).Hash.ToLower()
+Set-Content -Path "$Output.sha256" -Value $Hash -Encoding ascii -NoNewline
+
 Write-Host "Built $Output"
+Write-Host "  sha256 $Hash"

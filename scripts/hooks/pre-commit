@@ -1,0 +1,46 @@
+#!/bin/sh
+# Refuse a commit that changes the daemon's sources without the rebuilt binary alongside it.
+#
+# The daemon ships as a committed ELF asset, so a source-only commit leaves the repo describing one
+# daemon and shipping another — and nothing downstream would notice, because Gradle never compiles
+# the C. AGENTS.md states the rule; this enforces it.
+#
+# Install with: scripts/install-hooks.ps1  (or: git config core.hooksPath scripts/hooks)
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+sources_changed=$(printf '%s\n' "$staged" | grep -E '^android/app/src/main/native/.*\.(c|h)$' || true)
+if [ -z "$sources_changed" ]; then
+    exit 0
+fi
+
+binary='android/app/src/main/assets/input_mirror/input_mirror'
+hash_file="$binary.sha256"
+
+binary_staged=$(printf '%s\n' "$staged" | grep -Fx "$binary" || true)
+hash_staged=$(printf '%s\n' "$staged" | grep -Fx "$hash_file" || true)
+
+if [ -n "$binary_staged" ] && [ -n "$hash_staged" ]; then
+    # Both present: confirm the staged binary really is what the staged hash claims. Read from the
+    # index, not the working tree, so a rebuild left unstaged cannot make this pass.
+    actual=$(git show ":$binary" | sha256sum | cut -d' ' -f1)
+    recorded=$(git show ":$hash_file" | tr -d '[:space:]')
+    if [ "$actual" = "$recorded" ]; then
+        exit 0
+    fi
+    echo "pre-commit: the staged input_mirror does not match its staged hash." >&2
+    echo "  recorded $recorded" >&2
+    echo "  actual   $actual" >&2
+    echo "Rebuild with scripts/build-input-mirror.ps1 and stage both files." >&2
+    exit 1
+fi
+
+echo "pre-commit: native sources changed but the daemon binary was not rebuilt." >&2
+echo "" >&2
+printf '%s\n' "$sources_changed" | sed 's/^/  changed: /' >&2
+echo "" >&2
+echo "The daemon is not built by Gradle; the committed binary IS what ships." >&2
+echo "Run scripts/build-input-mirror.ps1, then stage:" >&2
+echo "  $binary" >&2
+echo "  $hash_file" >&2
+exit 1
