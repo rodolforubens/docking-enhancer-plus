@@ -230,6 +230,9 @@ class InputMirrorSupervisorService : Service() {
     private fun mappingFor(devices: List<ControllerDevice>, sourcePath: String?): ControllerMapping {
         val key = devices.firstOrNull { it.path == sourcePath }?.mappingKey
             ?: return ControllerMapping()
+        // A pad the bundled database knows starts life already mapped; a pad the user has touched is
+        // left exactly as they saved it.
+        graph.seedDefaultMapping(key)
         return graph.mappingRepository.get(key)
     }
 

@@ -6,10 +6,12 @@ import android.os.Build
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.odininputmirror.BuildConfig
 import com.odininputmirror.InputMirrorSupervisorService
 import com.odininputmirror.MirrorStateStore
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.MirrorStatus
 import com.odininputmirror.domain.model.findSavedControllerDevice
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +40,8 @@ data class MirrorUiState(
     // How many controls the external controller has captured, for the card. Null when it has no
     // identity to key a mapping on.
     val mappedControlCount: Int? = null,
+    // The external pad carries an untouched database default (as opposed to the user's own mapping).
+    val hasSeededMapping: Boolean = false,
     // The service is published but never answers (Odin 2 Mini). Distinct from absent, because
     // telling that owner their device "doesn't have it" would be flatly wrong.
     val serviceUnresponsive: Boolean = false,
@@ -51,14 +55,24 @@ data class MirrorUiState(
 }
 
 class MirrorViewModel(private val appContext: Context) : ViewModel() {
-    private val graph = InputMirrorGraph(appContext)
+    // Same dock-mode answer as the supervisor's graph, deliberately. They are two graphs reading the
+    // same thing, and when only one was told to force dock mode the screen flipped to "undocked" the
+    // moment anything made it re-read for itself — telling the user the dock had gone while the
+    // supervisor happily went on mirroring.
+    private val graph = InputMirrorGraph(appContext, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
 
     private val _state = MutableStateFlow(MirrorUiState())
     val state: StateFlow<MirrorUiState> = _state.asStateFlow()
 
     // Owned rather than injected as a second ViewModel: it lives and dies with this screen, and
     // borrowing this scope is what keeps its polling tied to the same lifecycle.
-    val mappingEditor = MappingEditorController(graph, viewModelScope)
+    val mappingEditor = MappingEditorController(
+        graph = graph,
+        scope = viewModelScope,
+        // Fired once the editor has finished writing, so the card's badge reflects what was just
+        // saved instead of waiting for a supervisor snapshot that a mapping edit never triggers.
+        onMappingChanged = ::refreshMappingBadges,
+    )
 
     fun openMappingEditor() {
         val device = _state.value.externalDevice ?: return
@@ -153,11 +167,42 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 restartWaiting = status.expectedRunning && !status.running,
                 docked = status.docked,
                 manualInternalGuid = status.manualInternalGuid,
-                mappedControlCount = externalDevice?.mappingKey?.let {
-                    graph.mappingRepository.get(it).boundControlCount
-                },
+                // Database defaults deliberately do not count: the green border and CUSTOM MAPPING
+                // badge mean "the user made this", and a pad that merely matched its profile would
+                // otherwise wear them out of the box.
+                mappedControlCount = externalDevice?.mappingKey?.let(::mappedCountFor),
+                hasSeededMapping = externalDevice?.mappingKey?.let(::isSeededFor) ?: false,
                 message = buildStatusMessage(status, available),
             )
+        }
+    }
+
+    // Database defaults deliberately do not count as "mapped": the green border and CUSTOM MAPPING
+    // badge mean "the user made this", and a pad that merely matched its profile would otherwise
+    // wear them out of the box.
+    private fun mappedCountFor(key: MappingKey): Int? =
+        graph.mappingRepository.get(key).boundControlCount
+            .takeIf { it > 0 && !graph.mappingRepository.isSeeded(key) }
+
+    private fun isSeededFor(key: MappingKey): Boolean =
+        graph.mappingRepository.isSeeded(key) && !graph.mappingRepository.get(key).isEmpty
+
+    /**
+     * Recompute just the badge fields after the editor writes.
+     *
+     * Needed because the rest of this screen's state arrives on the supervisor's snapshot, and that
+     * only re-emits when the mirror or the device list changes — neither of which a mapping edit
+     * does. Without this the card keeps whatever badge it had when the last snapshot landed, so a
+     * freshly seeded or freshly cleared pad shows the previous answer until something unrelated
+     * happens to move the supervisor.
+     */
+    fun refreshMappingBadges() {
+        viewModelScope.launch {
+            val key = _state.value.externalDevice?.mappingKey ?: return@launch
+            val (count, seeded) = withContext(Dispatchers.IO) {
+                mappedCountFor(key) to isSeededFor(key)
+            }
+            _state.update { it.copy(mappedControlCount = count, hasSeededMapping = seeded) }
         }
     }
 

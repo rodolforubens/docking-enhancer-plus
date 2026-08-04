@@ -46,6 +46,21 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
         mirrorRunningProvider = { processRepository.isRunning() },
     )
 
+    // First-time defaults from the bundled SDL_GameControllerDB (see third-party/gamecontrollerdb).
+    // The asset is re-read per seeding because seeding happens at most once per new controller.
+    internal val defaultMappingSeeder = DefaultMappingSeeder(
+        databaseLines = {
+            appContext.assets.open("gamecontrollerdb.txt").bufferedReader().readLines().asSequence()
+        },
+        devices = inputDeviceRepository,
+        mappings = mappingRepository,
+    )
+
+    /** Seed a known controller's default mapping if the user has never mapped it. Safe to repeat. */
+    fun seedDefaultMapping(key: com.odininputmirror.domain.model.MappingKey) {
+        runCatching { defaultMappingSeeder.seedIfEmpty(key) }
+    }
+
     val getConnectedDevices = GetConnectedDevicesUseCase(inputDeviceRepository)
     val startMirror = StartMirrorUseCase(processRepository, settingsRepository)
     val stopMirror = StopMirrorUseCase(processRepository, settingsRepository)

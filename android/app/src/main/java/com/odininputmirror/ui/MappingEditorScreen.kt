@@ -131,7 +131,13 @@ fun MappingEditorScreen(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "${state.controllerName} — anything without a binding is forwarded as the pad reports it.",
+                if (state.seeded) {
+                    // A known pad arrives already mapped from its profile; the editor's job then is
+                    // adjustment, and saying so stops "why is everything filled in?" cold.
+                    "${state.controllerName} — mapped from its profile. Change anything that feels wrong."
+                } else {
+                    "${state.controllerName} — anything without a binding is forwarded as the pad reports it."
+                },
                 color = Palette.textSecondary,
                 fontSize = 14.sp,
             )

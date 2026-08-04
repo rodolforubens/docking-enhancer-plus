@@ -18,4 +18,13 @@ interface MappingRepository {
 
     /** Forget this controller's mapping, returning it to the daemon's defaults. */
     fun clear(key: MappingKey)
+
+    /**
+     * Whether the stored mapping is an untouched database default, as opposed to something the user
+     * shaped. The distinction is presentational: a seeded pad just works and needs no callout, while
+     * the "custom mapping" badge means the user made it and should only ever mean that.
+     */
+    fun isSeeded(key: MappingKey): Boolean = false
+
+    fun setSeeded(key: MappingKey, seeded: Boolean) {}
 }

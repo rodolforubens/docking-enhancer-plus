@@ -32,6 +32,8 @@ data class MappingEditorUiState(
     val capturing: MappingSlot? = null,
     /** Why the last press was refused, shown in the overlay. */
     val notice: String? = null,
+    /** True when what is on screen is an untouched database default rather than the user's work. */
+    val seeded: Boolean = false,
 ) {
     val boundCount: Int get() = bindings.size
 }
@@ -50,6 +52,8 @@ data class MappingEditorUiState(
 class MappingEditorController(
     private val graph: InputMirrorGraph,
     private val scope: CoroutineScope,
+    /** Called once the mapping has been written, so whatever displays it can catch up. */
+    private val onMappingChanged: () -> Unit = {},
 ) {
     private val _state = MutableStateFlow(MappingEditorUiState())
     val state: StateFlow<MappingEditorUiState> = _state.asStateFlow()
@@ -64,6 +68,9 @@ class MappingEditorController(
     /** Whether opening threw away bindings aimed at slots that no longer exist. */
     private var purgedOnOpen = false
 
+    /** Whether the mapping on screen came from the database untouched. */
+    private var seededOnOpen = false
+
     fun open(controllerName: String, key: MappingKey) {
         if (_state.value.open) return
         mappingKey = key
@@ -75,7 +82,11 @@ class MappingEditorController(
             // measured Odin defaults only stand in when there is nothing to inspect. This is what
             // keeps the editor from ever offering a target the kernel would silently drop.
             val (saved, slots) = withContext(Dispatchers.IO) {
+                // The supervisor normally seeds before the mirror ever starts; repeating it here
+                // covers an editor opened before any start. A no-op for a pad already mapped.
+                graph.seedDefaultMapping(key)
                 val mapping = graph.mappingRepository.get(key)
+                seededOnOpen = runCatching { graph.mappingRepository.isSeeded(key) }.getOrDefault(false)
                 val traits = runCatching { graph.inputDeviceRepository.targetTraits() }.getOrNull()
                 mapping to mappingSlots(traits ?: odinFallbackTraits())
             }
@@ -98,6 +109,7 @@ class MappingEditorController(
                 controllerName = controllerName,
                 slots = slots,
                 bindings = openedWith,
+                seeded = seededOnOpen,
             )
         }
     }
@@ -120,7 +132,9 @@ class MappingEditorController(
     /** Back to forwarding whatever the pad reports for this slot. */
     fun clear(slot: MappingSlot) {
         if (!_state.value.open) return
-        _state.update { it.copy(bindings = it.bindings - slot.target, capturing = null, notice = null) }
+        _state.update {
+            it.copy(bindings = it.bindings - slot.target, capturing = null, notice = null, seeded = false)
+        }
         stopPolling()
         scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
     }
@@ -129,7 +143,9 @@ class MappingEditorController(
     fun clearAll() {
         if (!_state.value.open) return
         stopPolling()
-        _state.update { it.copy(bindings = emptyMap(), capturing = null, notice = null) }
+        // No longer "the profile as it came": what is on screen is the user's doing from here on,
+        // even though clearing it all is what will hand the profile back on the way out.
+        _state.update { it.copy(bindings = emptyMap(), capturing = null, notice = null, seeded = false) }
         scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
     }
 
@@ -152,12 +168,26 @@ class MappingEditorController(
             graph.processRepository.endCapture()
             if (key != null && edited) {
                 val mapping = ControllerMapping(bindings.map { Binding(it.value, it.key) })
-                if (mapping.isEmpty) graph.mappingRepository.clear(key)
-                else graph.mappingRepository.save(key, mapping)
+                if (mapping.isEmpty) {
+                    graph.mappingRepository.clear(key)
+                    // Clearing everything means "back to how this should be", and for a pad the
+                    // database knows, that is its profile. Restored HERE rather than at the next
+                    // mirror start: otherwise the card sits badge-less claiming the pad has no
+                    // mapping while it is about to be handed one, and the pad stays unmapped until
+                    // something unrelated happens to restart the daemon. A pad the database does not
+                    // know seeds nothing and stays genuinely cleared.
+                    graph.seedDefaultMapping(key)
+                } else {
+                    graph.mappingRepository.save(key, mapping)
+                    // Whatever this was before, it is the user's now.
+                    graph.mappingRepository.setSeeded(key, false)
+                }
                 // Advancing the generation is what makes the supervisor push the new config on its
                 // next tick — the same path a toggle takes, so the daemon adopts it without a restart.
                 graph.settingsRepository.bumpConfigGeneration()
             }
+            // After the write, not before: the badge is read straight back out of storage.
+            withContext(Dispatchers.Main) { onMappingChanged() }
         }
         _state.value = MappingEditorUiState()
     }
@@ -222,7 +252,12 @@ class MappingEditorController(
         stopPolling()
         scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
         _state.update {
-            it.copy(bindings = it.bindings + (slot.target to source), capturing = null, notice = null)
+            it.copy(
+                bindings = it.bindings + (slot.target to source),
+                capturing = null,
+                notice = null,
+                seeded = false,
+            )
         }
     }
 

@@ -41,6 +41,20 @@ internal class AndroidInputDeviceRepository(
         )
     }
 
+    // The real pad keeps its /proc entry — bitmasks included — even while its /dev node is hidden,
+    // which is exactly when seeding runs.
+    override fun sourceTraits(key: MappingKey): TargetTraits? {
+        val entry = readProcEntries().firstOrNull {
+            it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
+                it.vendorId != 0 &&
+                MappingKey.of(it.vendorId, it.productId) == key
+        } ?: return null
+        if (entry.keyBits.isEmpty() && entry.absBits.isEmpty()) {
+            return null
+        }
+        return TargetTraits(keys = entry.keyBits, axes = entry.absBits)
+    }
+
     private fun readProcEntries(): List<ProcInputEntry> =
         shell.read("cat /proc/bus/input/devices")
             .split(Regex("\\n\\s*\\n"))

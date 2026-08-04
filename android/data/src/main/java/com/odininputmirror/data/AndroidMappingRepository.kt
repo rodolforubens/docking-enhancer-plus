@@ -21,10 +21,21 @@ internal class AndroidMappingRepository(context: Context) : MappingRepository {
     }
 
     override fun clear(key: MappingKey) {
-        prefs.edit().remove(keyOf(key)).apply()
+        // The flag goes with the mapping it describes: a cleared pad re-seeds as if never seen.
+        prefs.edit().remove(keyOf(key)).remove(seededKeyOf(key)).apply()
+    }
+
+    override fun isSeeded(key: MappingKey): Boolean = prefs.getBoolean(seededKeyOf(key), false)
+
+    override fun setSeeded(key: MappingKey, seeded: Boolean) {
+        prefs.edit().apply {
+            if (seeded) putBoolean(seededKeyOf(key), true) else remove(seededKeyOf(key))
+        }.apply()
     }
 
     // Namespaced so a controller's mapping can never collide with the mirror's own settings, which
     // share this preferences file.
     private fun keyOf(key: MappingKey) = "$KEY_MAPPING_PREFIX${key.value}"
+
+    private fun seededKeyOf(key: MappingKey) = "${KEY_MAPPING_PREFIX}seeded_${key.value}"
 }

@@ -238,6 +238,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                     enabled = true,
                     onClick = null,
                     hasCustomMapping = (state.mappedControlCount ?: 0) > 0,
+                    hasSeededMapping = state.hasSeededMapping,
                     // Only offered once the controller has an identity to save a mapping against.
                     onEditMapping = if (state.externalDevice?.mappingKey != null) {
                         { viewModel.openMappingEditor() }
@@ -406,6 +407,8 @@ private fun DeviceCard(
     // True when the user has captured a mapping for THIS controller. Drives the green outline and
     // the badge — the card says so at a glance instead of spelling it out in a line of text.
     hasCustomMapping: Boolean = false,
+    // True when the controller carries an untouched database default instead: badge only, no green.
+    hasSeededMapping: Boolean = false,
     onEditMapping: (() -> Unit)? = null,
 ) {
     val selected = device != null
@@ -503,8 +506,13 @@ private fun DeviceCard(
         }
     }
 
-        if (hasCustomMapping) {
-            CustomMappingBadge(Modifier.align(Alignment.TopEnd))
+        // Mutually exclusive by construction: seeded means untouched, and the first edit converts it
+        // to custom. Green says "yours", the accent blue says "came with the controller".
+        when {
+            hasCustomMapping ->
+                MappingBadge("CUSTOM MAPPING", Palette.custom, Palette.customSoft, Modifier.align(Alignment.TopEnd))
+            hasSeededMapping ->
+                MappingBadge("DEFAULT", Palette.accent, Palette.accentSoft, Modifier.align(Alignment.TopEnd))
         }
     }
 }
@@ -514,18 +522,18 @@ private fun DeviceCard(
 // card no height. Inset from the corner rather than flush against it: a pill hard up against a
 // rounded border reads as a rendering mistake.
 @Composable
-private fun CustomMappingBadge(modifier: Modifier = Modifier) {
+private fun MappingBadge(text: String, ink: Color, fill: Color, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .padding(10.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(Palette.customSoft)
-            .border(1.dp, Palette.custom, RoundedCornerShape(8.dp))
+            .background(fill)
+            .border(1.dp, ink, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp, vertical = 5.dp),
     ) {
         Text(
-            "CUSTOM MAPPING",
-            color = Palette.custom,
+            text,
+            color = ink,
             fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
         )

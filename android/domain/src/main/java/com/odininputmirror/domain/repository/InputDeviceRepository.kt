@@ -1,6 +1,7 @@
 package com.odininputmirror.domain.repository
 
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.TargetTraits
 
 interface InputDeviceRepository {
@@ -12,4 +13,11 @@ interface InputDeviceRepository {
      * defaults rather than to an empty editor.
      */
     fun targetTraits(): TargetTraits? = null
+
+    /**
+     * The capability bitmasks of the REAL external controller behind this mapping key. Same shape as
+     * the target's traits, no labels: what matters here is which codes the pad declares, because the
+     * controller database's indices only mean anything counted over exactly that set.
+     */
+    fun sourceTraits(key: MappingKey): TargetTraits? = null
 }
