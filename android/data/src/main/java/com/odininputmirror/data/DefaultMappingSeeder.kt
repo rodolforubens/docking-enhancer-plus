@@ -5,6 +5,7 @@ import com.odininputmirror.domain.model.mappingSlots
 import com.odininputmirror.domain.model.odinFallbackTraits
 import com.odininputmirror.domain.repository.InputDeviceRepository
 import com.odininputmirror.domain.repository.MappingRepository
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * First-time defaults from the bundled controller database.
@@ -23,8 +24,16 @@ internal class DefaultMappingSeeder(
     private val devices: InputDeviceRepository,
     private val mappings: MappingRepository,
 ) {
-    /** Keys already looked up and found absent, so a pad the database does not know is asked once. */
-    private val missing = mutableSetOf<MappingKey>()
+    /**
+     * Keys the DATABASE has no entry for, so a pad it does not know is looked up once.
+     *
+     * Strictly that, and nothing else. It used to record the key before the lookup, which meant every
+     * later failure — a pad mid-reconnect, the mirror still starting — marked a pad the database DOES
+     * know as unknown for the life of the process, and it never got its profile.
+     *
+     * Shared between the supervisor thread and the editor's IO coroutines, so it has to be concurrent.
+     */
+    private val missing: MutableSet<MappingKey> = ConcurrentHashMap.newKeySet()
 
     fun seedIfEmpty(key: MappingKey) {
         val existing = runCatching { mappings.get(key) }.getOrNull() ?: return
@@ -33,15 +42,29 @@ internal class DefaultMappingSeeder(
         }
         // Seeding is attempted on every mirror start, and for a pad with no entry it would otherwise
         // re-read and re-parse the whole bundled database each time to reach the same answer.
-        if (!missing.add(key)) {
+        if (key in missing) {
             return
         }
 
         val parts = key.value.split(':')
-        val vendor = parts.getOrNull(0)?.toIntOrNull(16) ?: return
-        val product = parts.getOrNull(1)?.toIntOrNull(16) ?: return
+        val vendor = parts.getOrNull(0)?.toIntOrNull(16)
+        val product = parts.getOrNull(1)?.toIntOrNull(16)
+        if (vendor == null || product == null) {
+            // Not vendor:product hex, so no database entry can ever match it. Permanent, like an
+            // absent entry, and cached for the same reason.
+            missing.add(key)
+            return
+        }
 
-        val entry = GameControllerDb(databaseLines()).entryFor(vendor, product) ?: return
+        val entry = GameControllerDb(databaseLines()).entryFor(vendor, product)
+        if (entry == null) {
+            // The ONLY place a key is recorded as missing: this is the one answer that cannot change
+            // while the app runs. Everything below reads the live device instead, where a null is a
+            // moment in time rather than a verdict.
+            missing.add(key)
+            return
+        }
+
         // The REAL pad's capabilities: the entry's indices were assigned against that device, and
         // its /proc entry survives even while its /dev node is hidden.
         val source = devices.sourceTraits(key) ?: return
@@ -49,8 +72,6 @@ internal class DefaultMappingSeeder(
 
         val mapping = GameControllerDb.toMapping(entry, source.keys, source.axes, slots)
         if (!mapping.isEmpty) {
-            // It seeded, so it is not missing: a later clear must be free to seed it again.
-            missing.remove(key)
             mappings.save(key, mapping)
             // Marked so the UI can tell a default apart from the user's work: the "custom mapping"
             // badge should only ever mean the user made it. The first edit clears the mark.
