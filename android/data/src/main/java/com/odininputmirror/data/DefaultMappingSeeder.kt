@@ -23,9 +23,17 @@ internal class DefaultMappingSeeder(
     private val devices: InputDeviceRepository,
     private val mappings: MappingRepository,
 ) {
+    /** Keys already looked up and found absent, so a pad the database does not know is asked once. */
+    private val missing = mutableSetOf<MappingKey>()
+
     fun seedIfEmpty(key: MappingKey) {
         val existing = runCatching { mappings.get(key) }.getOrNull() ?: return
         if (!existing.isEmpty) {
+            return
+        }
+        // Seeding is attempted on every mirror start, and for a pad with no entry it would otherwise
+        // re-read and re-parse the whole bundled database each time to reach the same answer.
+        if (!missing.add(key)) {
             return
         }
 
@@ -41,6 +49,8 @@ internal class DefaultMappingSeeder(
 
         val mapping = GameControllerDb.toMapping(entry, source.keys, source.axes, slots)
         if (!mapping.isEmpty) {
+            // It seeded, so it is not missing: a later clear must be free to seed it again.
+            missing.remove(key)
             mappings.save(key, mapping)
             // Marked so the UI can tell a default apart from the user's work: the "custom mapping"
             // badge should only ever mean the user made it. The first edit clears the mark.
