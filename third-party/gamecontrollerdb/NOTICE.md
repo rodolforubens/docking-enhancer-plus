@@ -19,5 +19,6 @@ opened. The editor then edits over that default like over any other mapping.
 Database values (`b3`, `a2`, `h0.4`) are SDL joystick indices, not evdev codes. SDL's Linux backend
 assigns them by walking the device's declared capabilities in code order — buttons from
 `BTN_JOYSTICK` (0x120) up and then from 0, axes in `ABS_*` order skipping the hat range, hats as
-their own pair list. `SdlJoystickIndex.kt` reproduces that walk over the pad's `/proc` capability
-bitmasks; refreshing the bundled file is just re-running the filter, no re-translation involved.
+their own pair list. The `SdlJoystickIndex` object in `GameControllerDb.kt` reproduces that walk over
+the pad's `/proc` capability bitmasks; refreshing the bundled file is just re-running the filter, no
+re-translation involved.

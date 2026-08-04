@@ -50,6 +50,10 @@ path.
 | T6 hot reload | A settings change silently not taking effect, a malformed config being adopted, or the daemon restarting to apply one — which would release the grab and flash the pad visible. |
 | T7 capture | The mapping wizard seeing nothing, or worse, the controller still driving the game while the user maps it — pressing A to bind it would also press A in whatever is on screen. |
 | T8 remap | A saved mapping not reaching the forwarding path, or a control the user skipped being changed anyway. |
+| T9 axis→button | A trigger bound to a button slot firing on noise, or never releasing once past the threshold. |
+| T10 button→axis | A button bound to a stick direction arriving at partial deflection, or sticking at full. |
+| T11 capture expiry | A wizard that died mid-step leaving the pad permanently mute, with no way to revive it from the controller itself. |
+| T12 virtual mouse | The pointer failing to appear on Select+R3, the pad still driving the game while the cursor is up, or — worst — a uinput pointer outliving the daemon with nothing left to destroy it. |
 
 ## Measuring what the mirror costs
 
@@ -63,9 +67,15 @@ timing across two processes would mean correlating two clock domains.
 
 It reports a **control** first — the same round trip with no daemon in between — because the raw
 figure includes uinput, the input core and the harness's own wake-up. The mirror's real contribution
-is the difference. Measured on an Odin 2 Portal, 300 samples: control median 20µs, mirrored median
-108µs, so the daemon adds **roughly 0.09ms** (p95 ≈ 0.37ms). About half a percent of one 60Hz frame,
-against the 10–25ms a Bluetooth pad already spends on radio.
+is the difference. Measured on an Odin 2 Portal, 300 samples: control median 21µs, mirrored median
+59–61µs, so the daemon adds **roughly 0.04ms** (p95 ≈ 0.11ms). Well under a tenth of a percent of one
+60Hz frame, against the 10–25ms a Bluetooth pad already spends on radio.
+
+Treat that number as device-and-moment specific rather than a constant. An earlier run of this same
+harness recorded ~0.09ms, and re-measuring the *older* daemon binary on the same device the same
+afternoon gave ~0.05ms — so the gap was measurement conditions (thermal state, governor), not a code
+change. Which is the point of the control run: compare the two figures **from the same session**, and
+never a fresh mirrored figure against a remembered one.
 
 Re-run it after touching the forwarding path. A regression there is invisible to every other test in
 this suite, which only checks that events arrive, never how fast.
@@ -89,7 +99,9 @@ missing SELinux label, which is invisible to `ls`.
   external pad having no node of its own, and it is why T5's decoy is `--plain` (a non-controller the
   firmware ignores) instead of a foreign-vendor pad.
 - **`getevent` labels `0x130` as `BTN_GAMEPAD`**, not `BTN_SOUTH`/`BTN_A` — all aliases of one code.
-  Asserting on the wrong alias reads as a forwarding bug that is not there.
+  Asserting on the wrong alias reads as a forwarding bug that is not there. The same trap sits on the
+  virtual mouse: `0x110` prints as **`BTN_MOUSE`**, never `BTN_LEFT`. `BTN_RIGHT` (`0x111`) has no
+  alias and prints as itself, so only the left click misleads.
 - **Absolute axes dedupe.** The input core drops an ABS event repeating its current value, so any
   synthetic burst must alternate values or it arrives half empty.
 - **A physical pad sleeps mid-run.** The reason the suite uses synthetic devices at all.

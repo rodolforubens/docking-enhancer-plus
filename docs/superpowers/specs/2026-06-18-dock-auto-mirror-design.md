@@ -185,7 +185,11 @@ The notification is part of the product behavior because the user wants confirma
 
 The existing supervisor timing can be reused initially, but restart attempts should remain throttled to avoid CPU/battery waste during unstable reconnects.
 
-## React Native UI Impact
+## UI Impact
+
+> Written while the UI was still React Native. The app has since been rebuilt in Jetpack Compose and
+> no React Native remains; the intent below carried over unchanged, only the toolkit did not. Left as
+> written because this is a dated design note, not a maintained document.
 
 The UI should no longer be required for the main dock-and-play path.
 

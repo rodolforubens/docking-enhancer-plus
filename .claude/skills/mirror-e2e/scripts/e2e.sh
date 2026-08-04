@@ -547,6 +547,118 @@ else
 fi
 rm -f $TMP/t11.cap $TMP/t11a.out $TMP/t11b.out $CFG $FIFO
 
+# --- T12: virtual mouse ----------------------------------------------------------------------------
+#
+# The one feature whose failure is silent: the pointer lives on its own uinput device, so a mistake
+# here does not break forwarding, it just means Select+R3 does nothing — or worse, leaves a pointer
+# behind that nothing will ever destroy. Asserts on the device's existence in /proc/bus/input/devices
+# rather than on a log line, because that is what Android itself reacts to.
+
+echo ""
+echo "=== T12: el raton virtual aparece y se va con el combo ==="
+
+# The pointer's own node, by the name mouse.c gives it. The handlers line reads
+# "H: Handlers=event7 mouse2", so the prefix has to come off before the fields mean anything.
+mouse_node() {
+    awk '/Name="Docking Enhancer Mouse"/{f=1}
+         f && /Handlers=/ {
+             sub(/.*Handlers=/, "")
+             for (i = 1; i <= NF; i++) if ($i ~ /^event/) { print "/dev/input/" $i; exit }
+         }' /proc/bus/input/devices 2>/dev/null
+}
+
+# Select+R3 has to be HELD past the toggle threshold (500ms); the daemon completes it on a poll
+# timeout, so nothing new needs to arrive for it to fire.
+hold_mouse_combo() {
+    echo "key 314 1" >&3; echo "syn" >&3
+    echo "key 318 1" >&3; echo "syn" >&3
+    sleep 0.9
+    echo "key 318 0" >&3; echo "syn" >&3
+    echo "key 314 0" >&3; echo "syn" >&3
+    echo "syn" >&3
+    sleep 0.4
+}
+
+start_mirror "$SRC" "$DST" --virtual-mouse --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco en modo raton"
+else
+    if [ -z "$(mouse_node)" ]; then
+        ok "sin el combo no hay puntero"
+    else
+        bad "sin el combo no hay puntero  [ya existe $(mouse_node)]"
+    fi
+
+    hold_mouse_combo
+    MOUSE=$(mouse_node)
+
+    if [ -n "$MOUSE" ]; then
+        ok "el combo crea el puntero ($MOUSE)"
+
+        getevent -lt "$MOUSE" > $TMP/t12.mouse 2>&1 &
+        T12M=$!
+        getevent -lt "$DST"   > $TMP/t12.dst   2>&1 &
+        T12D=$!
+        sleep 0.4
+
+        # Stick deflection becomes cursor motion on the frame cadence, not per event.
+        echo "abs 0 30000" >&3; echo "syn" >&3
+        sleep 0.3
+        echo "abs 0 -30000" >&3; echo "syn" >&3
+        sleep 0.3
+        echo "abs 0 0" >&3; echo "syn" >&3
+        # A and B become the two clicks.
+        echo "key 304 1" >&3; echo "syn" >&3
+        sleep 0.2
+        echo "key 304 0" >&3; echo "syn" >&3
+        echo "key 305 1" >&3; echo "syn" >&3
+        sleep 0.2
+        echo "key 305 0" >&3; echo "syn" >&3
+        sleep 0.5
+        kill $T12M $T12D 2>/dev/null
+
+        expect_contains $TMP/t12.mouse "REL_X" "el stick mueve el cursor"
+        # getevent prints 0x110 as BTN_MOUSE, never BTN_LEFT — same code, different alias, exactly
+        # like BTN_GAMEPAD for 0x130. Asserting on BTN_LEFT reads as a broken click that works fine.
+        expect_contains $TMP/t12.mouse "BTN_MOUSE" "A hace click izquierdo"
+        expect_contains $TMP/t12.mouse "BTN_RIGHT" "B hace click derecho"
+        # The whole point of mouse mode: the game underneath stops receiving the pad.
+        if grep -q "BTN_GAMEPAD" $TMP/t12.dst 2>/dev/null; then
+            bad "el pad sigue llegando al target mientras el raton esta activo"
+        else
+            ok "el pad deja de llegar al target mientras el raton esta activo"
+        fi
+
+        hold_mouse_combo
+        if [ -z "$(mouse_node)" ]; then
+            ok "el combo se lleva el puntero"
+        else
+            bad "el combo se lleva el puntero  [sigue ahi $(mouse_node)]"
+        fi
+
+        # Forwarding has to come back, or the pad is left mute.
+        getevent -lt "$DST" > $TMP/t12.back 2>&1 &
+        T12B=$!
+        sleep 0.4
+        echo "key 304 1" >&3; echo "syn" >&3
+        echo "key 304 0" >&3; echo "syn" >&3
+        sleep 0.5
+        kill $T12B 2>/dev/null
+        expect_contains $TMP/t12.back "BTN_GAMEPAD" "el pad vuelve a llegar al target al salir"
+    else
+        bad "el combo crea el puntero"
+    fi
+
+    stop_mirror
+    # Nothing may outlive the daemon: a stranded pointer would sit in the device list forever.
+    if [ -z "$(mouse_node)" ]; then
+        ok "no queda ningun puntero tras cerrar el daemon"
+    else
+        bad "quedo un puntero huerfano  [$(mouse_node)]"
+    fi
+fi
+rm -f $TMP/t12.mouse $TMP/t12.dst $TMP/t12.back
+
 # --- teardown ------------------------------------------------------------------------------------
 
 echo ""

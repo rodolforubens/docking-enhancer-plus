@@ -105,11 +105,13 @@ The one thing that still restarts the daemon is changing **which devices** are m
 
 ## Latency
 
-**The mirror adds roughly 0.09 ms to a button press** (p95 ≈ 0.37 ms), measured on an Odin 2 Portal
-over 300 presses.
+**The mirror adds roughly 0.04 ms to a button press** (p95 ≈ 0.11 ms), measured on an Odin 2 Portal
+over 300 presses. An earlier run recorded 0.09 ms; re-measuring the older daemon alongside the current
+one gave the same ~0.04 ms, so that spread is the device's own state on the day rather than anything
+in the code. Only compare a mirrored figure against the control run from the same session.
 
 The figure is the difference against a control run of the same round trip with no daemon in between,
-so it excludes the measurement harness's own overhead. For scale, that is about half a percent of a
+so it excludes the measurement harness's own overhead. For scale, that is a fraction of a percent of a
 single 60Hz frame, against the 10–25 ms a Bluetooth pad already spends on radio. Forwarding costs one
 read and one write per event, with the daemon at `nice -20`.
 
@@ -131,6 +133,16 @@ Reproduce it with the e2e suite's `latency.sh`.
   may cost one extra press to resync.
 - The mirror writes directly to the internal controller's evdev node, which depends on the device
   exposing it that way. (The virtual mouse is the exception — it creates its own `uinput` pointer.)
+- **Custom mappings do not move the combos or the mouse buttons.** Select+Start, Select+R3, and the
+  A/B/R1 controls inside mouse mode all read the pad's *physical* codes, because the mapping is
+  applied on the forwarding path and those never reach it. This is deliberate: a combo that moved
+  when you remapped your face buttons would be a combo you could accidentally remap away, with no way
+  left to get back. Remapping A does change what the game sees; it does not change which button
+  left-clicks in mouse mode.
+- **A config without a `bindings` key clears the mapping** rather than keeping the one in force. Every
+  other field in a partial config falls back to the running value; this one does not, because
+  "no bindings" has to be expressible — otherwise a cleared mapping could never be pushed to a live
+  daemon. The app always writes the key explicitly, empty array included.
 
 ## Building from source
 
@@ -149,8 +161,21 @@ $env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\<version>"
 
 The daemon is one binary split across a few translation units — `input_mirror.c` holds the mirror
 loop and its handlers, `config.c` the live configuration and control fifo, `hide_nodes.c` the
-hide/restore/heal of `/dev/input` entries. The build script compiles every `.c` in that directory,
-so adding a module means dropping a file in rather than editing the script.
+hide/restore/heal of `/dev/input` entries, `mapping.c` the per-controller remapping, `capture.c` the
+wizard's capture step, `mouse.c` the virtual pointer, and `evdev.c` the few write primitives the rest
+share. The build script compiles every `.c` in that directory, so adding a module means dropping a
+file in rather than editing the script.
+
+It builds with `-Werror` and the usual hardening for something that runs as root
+(`-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2`, PIE, full RELRO, non-executable stack). Because
+the artifact is committed rather than built by CI, a warning that nobody's local build surfaces would
+otherwise ship unnoticed — `-Werror` is what makes the build itself the thing that refuses.
+
+`scripts/build-input-mirror.ps1` records the binary's SHA-256 beside it.
+`scripts/check-input-mirror-sync.ps1` verifies the committed binary matches that hash and that no
+source is newer than it, and the tracked `pre-commit` hook (install once with
+`scripts/install-hooks.ps1`) refuses a commit that touches `native/*.c` without staging the rebuilt
+binary. That trio is as close to CI as a project needing a handheld to test can get.
 
 It targets `arm64-v8a` and drops the result into
 `android/app/src/main/assets/input_mirror/input_mirror`, which is tracked intentionally so users
