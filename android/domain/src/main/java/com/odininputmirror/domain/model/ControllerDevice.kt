@@ -17,4 +17,9 @@ data class ControllerDevice(
     // the firmware exposes only the re-exposed node in /dev); either way it is the framework-visible
     // one. Null for the internal controller and when no such node exists.
     val hideNodePath: String? = null,
+    // Identity of the REAL controller behind this entry, used to key a saved mapping. [guid] cannot
+    // do that job for an external pad: the firmware republishes every one of them under its own
+    // vendor:product, so they all share a guid. Null when no distinct real device was found — an
+    // internal controller, or a pad the firmware did not republish.
+    val mappingKey: MappingKey? = null,
 )

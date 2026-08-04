@@ -48,6 +48,8 @@ path.
 | T4 owner watchdog | A daemon outliving its app (uninstall, cleared data) and keeping the pad grabbed and hidden forever. |
 | T5 identity refusal | The daemon unlinking an unrelated device after event numbers renumber. |
 | T6 hot reload | A settings change silently not taking effect, a malformed config being adopted, or the daemon restarting to apply one — which would release the grab and flash the pad visible. |
+| T7 capture | The mapping wizard seeing nothing, or worse, the controller still driving the game while the user maps it — pressing A to bind it would also press A in whatever is on screen. |
+| T8 remap | A saved mapping not reaching the forwarding path, or a control the user skipped being changed anyway. |
 
 ## Measuring what the mirror costs
 

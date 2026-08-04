@@ -42,6 +42,10 @@ internal class InputMirrorFiles(
     val configFile: File
         get() = File(filesDir, "input_mirror.config.json")
 
+    // Append-only log of what the daemon saw during a capture step.
+    val captureFile: File
+        get() = File(filesDir, "input_mirror.capture")
+
     val controlFifo: File
         get() = File(filesDir, "input_mirror.ctl")
 

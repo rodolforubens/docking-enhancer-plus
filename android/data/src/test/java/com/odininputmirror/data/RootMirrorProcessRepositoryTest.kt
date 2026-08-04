@@ -1,5 +1,8 @@
 package com.odininputmirror.data
 
+import com.odininputmirror.domain.model.Binding
+import com.odininputmirror.domain.model.ControlRef
+import com.odininputmirror.domain.model.ControllerMapping
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
@@ -121,7 +124,13 @@ class RootMirrorProcessRepositoryTest {
         assertTrue(binary.exists())
 
         val command = shell.launchedDaemons.single()
-        assertTrue(command.startsWith("pidof input_mirror >/dev/null 2>&1 && exit 0; "))
+        // The guard bails out only for a daemon already on THESE nodes, and stops any other. Both
+        // halves matter: a reconnect gives the controller a new eventN, and skipping the launch
+        // because some older daemon is alive is what left the mirror reporting healthy while
+        // forwarding nothing.
+        assertTrue(command.contains("[ \"\$2\" = '/dev/input/event9' ]"))
+        assertTrue(command.contains("[ \"\$3\" = '/dev/input/event2' ]"))
+        assertTrue(command.contains("kill -TERM \$p"))
         assertTrue(command.contains("'/dev/input/event9' '/dev/input/event2'"))
         assertTrue(command.contains(" --home-as-back"))
         assertTrue(command.contains(" --combo-hold-kill-app"))
@@ -163,11 +172,12 @@ class RootMirrorProcessRepositoryTest {
             shell = shell,
             nowMillis = { now },
             procRoot = procRoot,
-            sendReload = { fifo -> poked = fifo; true },
+            sendCommand = { fifo, _ -> poked = fifo; true },
         )
 
         val delivered = reloading.applyLiveSettings(
             MirrorSettings(configGeneration = 9L, homeAsBack = true, virtualMouse = false),
+            ControllerMapping(listOf(Binding(ControlRef.button(304), ControlRef.button(307)))),
         )
 
         assertTrue(delivered)
@@ -176,6 +186,7 @@ class RootMirrorProcessRepositoryTest {
         assertTrue(config.contains("\"generation\": 9"))
         assertTrue(config.contains("\"home_as_back\": true"))
         assertTrue(config.contains("\"virtual_mouse\": false"))
+        assertTrue(config.contains("\"bindings\": [[0, 304, 0, 0, 307, 0]]"))
         // The reload must never travel through PServer: that queue is serialized process-wide, and
         // keeping a toggle off it is the whole reason the fifo exists.
         assertTrue(shell.executed.isEmpty())
@@ -308,6 +319,10 @@ private class FakeSettingsRepository(
     var state: MirrorSettings = MirrorSettings(),
 ) : MirrorSettingsRepository {
     override fun getSettings(): MirrorSettings = state
+
+    override fun bumpConfigGeneration() {
+        state = state.copy(configGeneration = state.configGeneration + 1)
+    }
 
     override fun saveStarted(request: MirrorStartRequest, startedAt: Long) {
         state = state.copy(

@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -40,8 +42,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.InputMode
 import androidx.compose.ui.platform.LocalContext
@@ -73,7 +78,23 @@ private fun Context.findMainActivity(): MainActivity? {
 @Composable
 fun MirrorScreen(viewModel: MirrorViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val editorState by viewModel.mappingEditor.state.collectAsStateWithLifecycle()
+
+    // A whole screen rather than an overlay: mapping is the only thing happening while it is open,
+    // and the controller is answering it instead of driving whatever would show through behind.
+    if (editorState.open) {
+        MappingEditorScreen(
+            state = editorState,
+            onBind = { viewModel.mappingEditor.bind(it) },
+            onClear = { viewModel.mappingEditor.clear(it) },
+            onCancelBind = { viewModel.mappingEditor.cancelBind() },
+            onClearAll = { viewModel.mappingEditor.clearAll() },
+            onClose = { viewModel.mappingEditor.close() },
+        )
+        return
+    }
     var pickerOpen by remember { mutableStateOf(false) }
+    var screenHasFocus by remember { mutableStateOf(false) }
     // Initial gamepad focus prefers the first control (the Local Controller card) and falls back to
     // the always-present primary button for when the card isn't focusable (mirror on / busy).
     val topFocus = remember { FocusRequester() }
@@ -93,12 +114,14 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
     // the window starts in Touch input mode, in which requestFocus() is a silent no-op and the D-pad
     // and stick have no anchor to navigate from until a face button hands focus out.
     val inputModeManager = LocalInputModeManager.current
-    val anchorFocus = remember(inputModeManager, topFocus, primaryFocus) {
+    val focusManager = LocalFocusManager.current
+    // Reports whether a target actually took the focus. The caller needs to know: a request made
+    // before the node is placed fails silently, and there is no other way to tell.
+    val anchorFocus: () -> Boolean = remember(inputModeManager, topFocus, primaryFocus) {
         {
             inputModeManager.requestInputMode(InputMode.Keyboard)
-            if (runCatching { topFocus.requestFocus() }.isFailure) {
-                runCatching { primaryFocus.requestFocus() }
-            }
+            runCatching { topFocus.requestFocus() }.isSuccess ||
+                runCatching { primaryFocus.requestFocus() }.isSuccess
         }
     }
 
@@ -107,7 +130,9 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
     // D-pad/stick have no focus to move from until a button press hands it out.
     DisposableEffect(context, anchorFocus) {
         val activity = context.findMainActivity()
-        activity?.onWindowFocused = anchorFocus
+        // The Activity hook wants a plain callback; whether the anchor took is only the retry
+        // loop's business.
+        activity?.onWindowFocused = { anchorFocus() }
         onDispose { activity?.onWindowFocused = null }
     }
 
@@ -122,13 +147,29 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Give the gamepad a focus anchor on launch so the D-pad works immediately. Retry across a few
-    // frames because the focus node may not be placed on the first pass; stop once we have switched
-    // to keyboard input mode (touch mode left), at which point the anchor has taken hold.
-    LaunchedEffect(Unit) {
-        repeat(10) {
+    // Give the gamepad a focus anchor so the D-pad works immediately, retrying across a few frames
+    // because the focus node is not necessarily placed on the first pass.
+    //
+    // Keyed on the editor: coming back from it this whole screen is composed again, and it must take
+    // the focus back — the editor's rows are gone and nothing else holds it.
+    //
+    // The loop stops on OBSERVED focus, not on what requestFocus() reported. That distinction is the
+    // whole bug: on the return trip the anchor node exists immediately, so the request "succeeds" on
+    // the first frame while the focus goes nowhere, the loop congratulates itself and exits, and the
+    // pad is left with nothing to navigate from.
+    LaunchedEffect(editorState.open) {
+        if (editorState.open) return@LaunchedEffect
+        // Let go of the focus before asking for it. Leaving the editor destroys the node that held it,
+        // and Compose is then left pointing at something that no longer exists — in that state a fresh
+        // requestFocus() is refused outright, which is why the retry loop alone was not enough.
+        focusManager.clearFocus(force = true)
+        repeat(24) {
+            if (screenHasFocus) return@LaunchedEffect
             anchorFocus()
-            if (inputModeManager.inputMode == InputMode.Keyboard) return@LaunchedEffect
+            // Belt and braces: if neither named anchor will take it, ask the focus system for the
+            // first thing it can find. Landing somewhere unexpected still beats landing nowhere, which
+            // costs the user the whole app until they restart it.
+            if (!screenHasFocus) focusManager.moveFocus(FocusDirection.Down)
             delay(50)
         }
     }
@@ -144,7 +185,12 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Palette.screen),
+            .background(Palette.screen)
+            // Whether anything at all on this screen holds focus. `hasFocus` covers the whole subtree,
+            // so one modifier on the root answers a question no FocusRequester can: requestFocus()
+            // reports success as soon as its node exists, which is not the same as the node having
+            // taken focus.
+            .onFocusChanged { screenHasFocus = it.hasFocus },
     ) {
         Column(
             modifier = Modifier
@@ -165,9 +211,15 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             )
 
             Spacer(Modifier.height(16.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            // Equal heights: the row takes the tallest card's intrinsic height and both fill it. The
+            // external card carries a mapping line and a button the local one does not, and without
+            // this it simply grows past its neighbour.
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+            ) {
                 DeviceCard(
-                    modifier = Modifier.weight(1f).focusRequester(topFocus),
+                    modifier = Modifier.weight(1f).fillMaxHeight().focusRequester(topFocus),
                     title = "Local Controller",
                     device = state.localDevice,
                     hint = when {
@@ -179,12 +231,19 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                     onClick = if (state.busy || state.autoMirrorEnabled) null else ({ pickerOpen = true }),
                 )
                 DeviceCard(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
                     title = "External Controller",
                     device = state.externalDevice,
                     hint = "First connected controller",
                     enabled = true,
                     onClick = null,
+                    hasCustomMapping = (state.mappedControlCount ?: 0) > 0,
+                    // Only offered once the controller has an identity to save a mapping against.
+                    onEditMapping = if (state.externalDevice?.mappingKey != null) {
+                        { viewModel.openMappingEditor() }
+                    } else {
+                        null
+                    },
                 )
             }
 
@@ -344,13 +403,21 @@ private fun DeviceCard(
     hint: String,
     enabled: Boolean,
     onClick: (() -> Unit)?,
+    // True when the user has captured a mapping for THIS controller. Drives the green outline and
+    // the badge — the card says so at a glance instead of spelling it out in a line of text.
+    hasCustomMapping: Boolean = false,
+    onEditMapping: (() -> Unit)? = null,
 ) {
     val selected = device != null
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val shape = RoundedCornerShape(14.dp)
+    // Box only so the badge can sit over the corner; the card itself is still the Column below.
+    Box(modifier = modifier) {
     Column(
-        modifier = modifier
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight()
             .heightIn(min = 164.dp)
             .clip(shape)
             .background(
@@ -361,9 +428,12 @@ private fun DeviceCard(
                 },
             )
             .border(
-                width = if (focused) 2.dp else 1.dp,
+                // Focus still wins: it is transient and tells you where you are, while the mapping
+                // outline is a standing property of the controller.
+                width = if (focused || hasCustomMapping) 2.dp else 1.dp,
                 color = when {
                     focused -> Palette.focus
+                    hasCustomMapping -> Palette.custom
                     selected -> Palette.borderStrong
                     else -> Palette.border
                 },
@@ -393,6 +463,71 @@ private fun DeviceCard(
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+        )
+
+        if (onEditMapping != null && selected) {
+            Spacer(Modifier.height(12.dp))
+            // Its own focus source, separate from the card's: this is the only way into the wizard,
+            // so the D-pad has to be able to land on it and show that it has.
+            val mappingInteraction = remember { MutableInteractionSource() }
+            val mappingFocused by mappingInteraction.collectIsFocusedAsState()
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        when {
+                            mappingFocused -> Palette.focusBg
+                            hasCustomMapping -> Palette.customSoft
+                            else -> Palette.surface
+                        },
+                    )
+                    .border(
+                        width = if (mappingFocused) 2.dp else 1.dp,
+                        color = when {
+                            mappingFocused -> Palette.focus
+                            hasCustomMapping -> Palette.custom
+                            else -> Palette.border
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .clickable(interactionSource = mappingInteraction, indication = null) { onEditMapping() }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    text = if (hasCustomMapping) "Edit mapping" else "Map controls",
+                    color = Palette.textPrimary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+
+        if (hasCustomMapping) {
+            CustomMappingBadge(Modifier.align(Alignment.TopEnd))
+        }
+    }
+}
+
+// Floats over the card's top-right corner rather than sitting in its flow, so a controller that
+// carries a custom mapping is legible before reading a word of the card — and so the badge costs the
+// card no height. Inset from the corner rather than flush against it: a pill hard up against a
+// rounded border reads as a rendering mistake.
+@Composable
+private fun CustomMappingBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .padding(10.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(Palette.customSoft)
+            .border(1.dp, Palette.custom, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(
+            "CUSTOM MAPPING",
+            color = Palette.custom,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
         )
     }
 }

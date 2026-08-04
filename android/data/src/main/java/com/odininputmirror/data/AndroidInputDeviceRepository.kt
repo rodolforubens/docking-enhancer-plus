@@ -2,6 +2,8 @@ package com.odininputmirror.data
 
 import android.view.InputDevice
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.MappingKey
+import com.odininputmirror.domain.model.TargetTraits
 import com.odininputmirror.domain.repository.InputDeviceRepository
 import java.io.File
 
@@ -16,11 +18,36 @@ internal class AndroidInputDeviceRepository(
     // source (from a prior session, e.g. a real node that never has a /dev entry) is never revived
     // when nothing is running — which would otherwise block restarting on the live node.
     private val mirrorRunningProvider: () -> Boolean = { false },
+    private val keyLayouts: KeyLayoutFiles = KeyLayoutFiles(),
 ) : InputDeviceRepository {
-    override fun getConnectedControllers(): List<ControllerDevice> {
-        val procEntries = shell.read("cat /proc/bus/input/devices")
+    /**
+     * What the internal pad can actually receive, straight from the running system: its capability
+     * bitmasks out of /proc, and its Android key layout for what the codes mean. Built fresh per
+     * call — the editor opens rarely, and a cached answer would survive a controller swap.
+     */
+    override fun targetTraits(): TargetTraits? {
+        val procEntries = readProcEntries()
+        val internal = getConnectedControllers().firstOrNull { it.isInternal } ?: return null
+        val entry = procEntries.firstOrNull { it.path == internal.path } ?: return null
+        if (entry.keyBits.isEmpty() && entry.absBits.isEmpty()) {
+            return null
+        }
+        val layout = keyLayouts.resolve(entry.vendorId, entry.productId)
+        return TargetTraits(
+            keys = entry.keyBits,
+            axes = entry.absBits,
+            keyLabels = layout.keyLabels,
+            axisLabels = layout.axisLabels,
+        )
+    }
+
+    private fun readProcEntries(): List<ProcInputEntry> =
+        shell.read("cat /proc/bus/input/devices")
             .split(Regex("\\n\\s*\\n"))
             .mapNotNull { parseProcInputBlock(it) }
+
+    override fun getConnectedControllers(): List<ControllerDevice> {
+        val procEntries = readProcEntries()
 
         val mirroredNames = computeMirroredNames(procEntries)
 
@@ -66,6 +93,8 @@ internal class AndroidInputDeviceRepository(
                 isInternal = false,
                 isKnownInternal = false,
                 hideNodePath = entry.path,
+                // The mirror is running, so this is the path the wizard sees the pad through.
+                mappingKey = resolveMappingKey(entry.name, procEntries),
             ),
         )
     }
@@ -115,6 +144,25 @@ internal class AndroidInputDeviceRepository(
             .toSet()
     }
 
+    /**
+     * The identity a saved mapping is keyed on.
+     *
+     * The device we resolve for an external controller is the firmware's quirk twin, and every twin
+     * carries the same vendor:product — so keying a mapping on it would hand the second pad the
+     * first pad's mapping. The real controller keeps its own /proc entry under the same name (its
+     * /dev node is gone, which is why it is filtered out everywhere else), and that entry has its
+     * true vendor:product. Returns null when no such entry exists, which is the normal case for the
+     * internal controller.
+     */
+    internal fun resolveMappingKey(name: String, entries: List<ProcInputEntry>): MappingKey? {
+        val real = entries.firstOrNull { entry ->
+            entry.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
+                entry.vendorId != 0 &&
+                entry.name.lowercase() == name.lowercase()
+        } ?: return null
+        return MappingKey.of(real.vendorId, real.productId)
+    }
+
     internal fun resolveControllerDevice(
         candidate: ControllerCandidate,
         entries: List<ProcInputEntry>,
@@ -161,6 +209,9 @@ internal class AndroidInputDeviceRepository(
                     isInternal = isInternal,
                     isKnownInternal = isInternal,
                     hideNodePath = resolveHideNodePath(isInternal, normalizedName, entries),
+                    // Only an external controller gets one: the internal pad IS the quirk vendor, so
+                    // it has no separate real entry to point at, and it is never the one remapped.
+                    mappingKey = if (isInternal) null else resolveMappingKey(entry.name, entries),
                 )
             }
     }
@@ -201,8 +252,15 @@ internal class AndroidInputDeviceRepository(
             bus = identityMatch.groupValues[1].toInt(16),
             vendorId = identityMatch.groupValues[2].toInt(16),
             productId = identityMatch.groupValues[3].toInt(16),
+            keyBits = capabilityBits(block, "KEY"),
+            absBits = capabilityBits(block, "ABS"),
         )
     }
+
+    private fun capabilityBits(block: String, kind: String): Set<Int> =
+        Regex("B: $kind=(.+)").find(block)?.groupValues?.getOrNull(1)
+            ?.let(::parseCapabilityBits)
+            ?: emptySet()
 
     private fun isPhysicalGameController(device: InputDevice?): Boolean {
         device ?: return false
@@ -229,6 +287,8 @@ internal class AndroidInputDeviceRepository(
         val bus: Int,
         val vendorId: Int,
         val productId: Int,
+        val keyBits: Set<Int> = emptySet(),
+        val absBits: Set<Int> = emptySet(),
     ) {
         val eventNumber: Int
             get() = eventName.removePrefix("event").toIntOrNull() ?: Int.MAX_VALUE

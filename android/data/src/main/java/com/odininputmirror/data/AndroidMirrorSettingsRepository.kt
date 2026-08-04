@@ -61,6 +61,10 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
     // Options the running daemon can adopt without being restarted. The generation advances in the
     // same commit as the value: it is the number the daemon acknowledges once it has adopted the
     // change, so a value stored without advancing it would be a change nobody ever asks it to make.
+    override fun bumpConfigGeneration() {
+        prefs.edit().putLong(KEY_CONFIG_GENERATION, prefs.getLong(KEY_CONFIG_GENERATION, 0L) + 1).apply()
+    }
+
     private fun setLiveOption(key: String, enabled: Boolean) {
         prefs.edit()
             .putBoolean(key, enabled)

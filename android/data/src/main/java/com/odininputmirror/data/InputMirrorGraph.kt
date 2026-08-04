@@ -3,6 +3,7 @@ package com.odininputmirror.data
 import android.content.Context
 import com.odininputmirror.domain.repository.DockStateRepository
 import com.odininputmirror.domain.repository.InputDeviceRepository
+import com.odininputmirror.domain.repository.MappingRepository
 import com.odininputmirror.domain.repository.MirrorProcessRepository
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 import com.odininputmirror.domain.usecase.GetConnectedDevicesUseCase
@@ -37,6 +38,7 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
         files = InputMirrorFiles(appContext),
         shell = shell,
     )
+    val mappingRepository: MappingRepository = AndroidMappingRepository(appContext)
     val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(
         shell = shell,
         manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },

@@ -1,5 +1,8 @@
 package com.odininputmirror.domain.repository
 
+import com.odininputmirror.domain.model.CaptureKind
+import com.odininputmirror.domain.model.CaptureRead
+import com.odininputmirror.domain.model.ControllerMapping
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 
@@ -29,7 +32,7 @@ interface MirrorProcessRepository {
      * for about a second. Returns whether the request was delivered; the daemon confirms that it
      * actually adopted them through [appliedConfigGeneration].
      */
-    fun applyLiveSettings(settings: MirrorSettings): Boolean
+    fun applyLiveSettings(settings: MirrorSettings, mapping: ControllerMapping): Boolean
 
     /**
      * Generation of the config the running daemon has adopted, or null when it cannot be read — no
@@ -37,4 +40,27 @@ interface MirrorProcessRepository {
      * path instead of leaving a toggle silently unapplied.
      */
     fun appliedConfigGeneration(): Long?
+
+    /**
+     * Open a capture step on the running daemon.
+     *
+     * The app cannot listen for these events itself: the mirror holds an exclusive grab on the
+     * controller and has unlinked its /dev/input node, so nothing it does reaches the framework.
+     * While a step is open the daemon forwards nothing, so pressing A to map it does not also press
+     * A in whatever is on screen. Returns whether the request was delivered.
+     */
+    fun beginCapture(kind: CaptureKind): Boolean
+
+    /**
+     * Close capture and resume forwarding. The daemon does this on its own 30 seconds after the last
+     * command, so a crashed wizard cannot leave the controller mute — but say so explicitly when the
+     * wizard finishes or is cancelled.
+     */
+    fun endCapture(): Boolean
+
+    /** Read whatever the daemon has appended to the capture log past [offset]. */
+    fun readCaptures(offset: Long): CaptureRead
+
+    /** Drop anything left in the capture log, so a new wizard run starts from a clean slate. */
+    fun clearCaptures()
 }

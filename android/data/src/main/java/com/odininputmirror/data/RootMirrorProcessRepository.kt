@@ -2,6 +2,10 @@ package com.odininputmirror.data
 
 import android.system.Os
 import android.system.OsConstants
+import com.odininputmirror.domain.model.CaptureKind
+import com.odininputmirror.domain.model.CaptureRead
+import com.odininputmirror.domain.model.CaptureResult
+import com.odininputmirror.domain.model.ControllerMapping
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.repository.MirrorProcessRepository
@@ -16,7 +20,7 @@ internal class RootMirrorProcessRepository(
     private val procRoot: File = File("/proc"),
     // Injected like the shell above: android.system.Os is a stub on the JVM, and this path deserves
     // to stay unit-testable.
-    private val sendReload: (File) -> Boolean = ::writeReloadCommand,
+    private val sendCommand: (File, String) -> Boolean = ::writeControlCommand,
 ) : MirrorProcessRepository {
 
     override fun start(request: MirrorStartRequest) {
@@ -32,12 +36,14 @@ internal class RootMirrorProcessRepository(
                 homeAsBack = request.homeAsBack,
                 comboHoldKillApp = request.comboHoldKillApp,
                 virtualMouse = request.virtualMouse,
+                mapping = request.mapping,
             ),
         )
         files.ensureControlFifo()
 
         val configArg = " --config-file ${files.configFile.absolutePath.shellQuote()}"
         val controlFifoArg = " --control-fifo ${files.controlFifo.absolutePath.shellQuote()}"
+        val captureArg = " --capture-file ${files.captureFile.absolutePath.shellQuote()}"
         val homeAsBackArg = if (request.homeAsBack) " --home-as-back" else ""
         val comboHoldKillAppArg = if (request.comboHoldKillApp) " --combo-hold-kill-app" else ""
         val virtualMouseArg = if (request.virtualMouse) " --virtual-mouse" else ""
@@ -49,12 +55,32 @@ internal class RootMirrorProcessRepository(
         // binary writes (and chmods) its own pid/heartbeat files via --pid-file/--heartbeat-file,
         // so no `echo $! > pidfile` bookkeeping is needed here.
         //
-        // Guard against launching a duplicate: if an input_mirror is already alive (e.g. a daemon
-        // that outlived a previous app session), bail out. The exclusive EVIOCGRAB would make the
-        // second instance exit anyway, but this avoids the doomed spawn entirely.
         val launch =
-            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$hideNodeArgs$hiddenStateArg$configArg$controlFifoArg$pidFileArg$heartbeatFileArg"
-        val command = "pidof input_mirror >/dev/null 2>&1 && exit 0; $launch"
+            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$hideNodeArgs$hiddenStateArg$configArg$controlFifoArg$captureArg$pidFileArg$heartbeatFileArg"
+
+        // Only skip the launch for a daemon already mirroring THESE nodes.
+        //
+        // The old guard skipped for any live input_mirror at all, which turned a reconnect into a
+        // dead mirror: the controller comes back as a different eventN, the supervisor asks for the
+        // new one, and the guard sees the previous daemon — still alive, holding a file descriptor to
+        // a node that no longer exists — and quietly does nothing. Nobody was wrong and nothing
+        // worked. Matching on the argument list makes "already running" mean what it should, and
+        // stops the stale one so its replacement can take the grab.
+        val command = buildString {
+            append("for p in \$(pidof input_mirror 2>/dev/null); do ")
+            // The daemon's own argv, where $1 is the binary and $2/$3 are the source and target it
+            // opened. Compared exactly rather than by pattern: a substring match would call a daemon
+            // on /dev/input/event1 a match for a request for event10.
+            append("set -- \$(tr '\\0' ' ' < /proc/\$p/cmdline 2>/dev/null); ")
+            append("[ \"\$2\" = ${request.source.shellQuote()} ] && ")
+            append("[ \"\$3\" = ${request.target.shellQuote()} ] && exit 0; ")
+            append("kill -TERM \$p 2>/dev/null; ")
+            append("done; ")
+            // Give a daemon we just signalled time to restore what it hid and drop its grab, or the
+            // replacement races it for the EVIOCGRAB and loses.
+            append("i=0; while pidof input_mirror >/dev/null 2>&1 && [ \$i -lt 20 ]; do sleep 0.1; i=\$((i+1)); done; ")
+            append(launch)
+        }
         if (!shell.launchDaemon(command)) {
             throw IllegalStateException("PServer could not deliver the mirror launch command")
         }
@@ -121,16 +147,62 @@ internal class RootMirrorProcessRepository(
     // Write the document first, then poke: the daemon only re-reads on the poke, so the file is
     // always complete by the time it looks. Both halves stay clear of PServer — the app owns the
     // config and the fifo — which is what keeps a toggle off the serialized transaction queue.
-    override fun applyLiveSettings(settings: MirrorSettings): Boolean {
+    override fun applyLiveSettings(settings: MirrorSettings, mapping: ControllerMapping): Boolean {
         files.writeConfig(
             configJson(
                 generation = settings.configGeneration,
                 homeAsBack = settings.homeAsBack,
                 comboHoldKillApp = settings.comboHoldKillApp,
                 virtualMouse = settings.virtualMouse,
+                mapping = mapping,
             ),
         )
-        return sendReload(files.ensureControlFifo())
+        return sendCommand(files.ensureControlFifo(), RELOAD_COMMAND)
+    }
+
+    override fun beginCapture(kind: CaptureKind): Boolean {
+        val command = when (kind) {
+            CaptureKind.BUTTON -> CAPTURE_BUTTON_COMMAND
+            CaptureKind.STICK -> CAPTURE_STICK_COMMAND
+        }
+        return sendCommand(files.ensureControlFifo(), command)
+    }
+
+    override fun endCapture(): Boolean = sendCommand(files.ensureControlFifo(), CAPTURE_OFF_COMMAND)
+
+    override fun clearCaptures() {
+        files.captureFile.delete()
+    }
+
+    // The log is append-only and the caller carries the offset, so two presses in quick succession
+    // both survive — which a single-value file the daemon rewrote would not manage.
+    override fun readCaptures(offset: Long): CaptureRead {
+        val file = files.captureFile
+        val length = if (file.exists()) file.length() else 0L
+        // A shorter file than we last read means it was cleared under us (a new wizard run); start
+        // over rather than seeking past the end.
+        val start = if (offset > length) 0L else offset
+        if (length <= start) {
+            return CaptureRead(offset = length)
+        }
+
+        val text = runCatching {
+            file.inputStream().use { stream ->
+                stream.skip(start)
+                stream.readBytes().decodeToString()
+            }
+        }.getOrNull() ?: return CaptureRead(offset = start)
+
+        // Only whole lines: a line still being appended is picked up on the next read.
+        val complete = text.substringBeforeLast('\n', missingDelimiterValue = "")
+        if (complete.isEmpty()) {
+            return CaptureRead(offset = start)
+        }
+
+        val results = complete.lineSequence()
+            .mapNotNull { parseCaptureLine(it) }
+            .toList()
+        return CaptureRead(results = results, offset = start + complete.length + 1)
     }
 
     override fun appliedConfigGeneration(): Long? {
@@ -167,6 +239,36 @@ internal class RootMirrorProcessRepository(
     }
 }
 
+// One line of the daemon's capture log. Unknown verbs are ignored rather than treated as an error,
+// so an older app talking to a newer daemon skips what it doesn't understand instead of failing.
+private fun parseCaptureLine(line: String): CaptureResult? {
+    val parts = line.trim().split(' ').filter { it.isNotBlank() }
+    return when {
+        parts.size == 2 && parts[0] == "button" ->
+            parts[1].toIntOrNull()?.let { CaptureResult.Button(it) }
+
+        parts.size == 3 && parts[0] == "axis_button" -> {
+            val code = parts[1].toIntOrNull()
+            val sign = parts[2].toIntOrNull()
+            if (code != null && sign != null) CaptureResult.AxisButton(code, sign) else null
+        }
+
+        parts.size == 5 && parts[0] == "stick" -> {
+            val values = parts.drop(1).map { it.toIntOrNull() }
+            if (values.any { it == null }) {
+                null
+            } else {
+                CaptureResult.Stick(values[0]!!, values[1]!!, values[2]!!, values[3]!!)
+            }
+        }
+
+        else -> null
+    }
+}
+
+// An empty binding table is written out rather than omitted: the daemon rebuilds its table from
+// whatever the document names, so leaving the key out clears the mapping instead of keeping it.
+//
 // Every value here is a boolean or a number the app itself produced, so there is nothing to escape
 // and no reason to pull in a JSON library for four fields. The daemon reads it with a scanner of
 // matching simplicity.
@@ -175,12 +277,16 @@ private fun configJson(
     homeAsBack: Boolean,
     comboHoldKillApp: Boolean,
     virtualMouse: Boolean,
+    mapping: ControllerMapping,
 ): String = """
     {
       "generation": $generation,
       "home_as_back": $homeAsBack,
       "combo_hold_kill_app": $comboHoldKillApp,
-      "virtual_mouse": $virtualMouse
+      "virtual_mouse": $virtualMouse,
+      "mapping": {
+        "bindings": [${mapping.configBindingRows()}]
+      }
     }
 """.trimIndent()
 
@@ -192,7 +298,7 @@ private fun configJson(
  * turns "nobody is listening" into an immediate failure, which is exactly the signal the caller
  * needs to fall back to a restart.
  */
-private fun writeReloadCommand(fifo: File): Boolean {
+private fun writeControlCommand(fifo: File, command: String): Boolean {
     val descriptor = runCatching {
         Os.open(fifo.absolutePath, OsConstants.O_WRONLY or OsConstants.O_NONBLOCK, 0)
     }.getOrNull() ?: return false
@@ -200,8 +306,8 @@ private fun writeReloadCommand(fifo: File): Boolean {
     return try {
         // Well under PIPE_BUF, so the kernel delivers it as one indivisible chunk and the daemon
         // never reads half a command.
-        val command = RELOAD_COMMAND.toByteArray()
-        Os.write(descriptor, command, 0, command.size)
+        val payload = command.toByteArray()
+        Os.write(descriptor, payload, 0, payload.size)
         true
     } catch (_: Exception) {
         false

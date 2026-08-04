@@ -14,11 +14,43 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// Custom mapping capacity. A controller has far fewer controls than this; the limit exists so a
+// malformed config can never walk us off the end of the table.
+#define MAX_BINDINGS 64
+
+/*
+ * What one end of a binding refers to.
+ *
+ * This used to be two separate tables — buttons to buttons, axes to axes — with no way to cross
+ * between them, so a controller reporting its triggers as axes could not fill a button slot and no
+ * button could ever stand in for a stick direction. Naming the kind on each end instead makes the
+ * target space wide enough that both fall out of the same table.
+ */
+enum bind_kind {
+    BIND_KEY = 0,   // a button; `dir` unused, stored as 0
+    BIND_AXIS = 1,  // a whole axis; `dir` is its orientation (+1 as-is, -1 flipped)
+    BIND_HALF = 2,  // one half of an axis's travel; `dir` says which half, measured from rest
+};
+
+// One remapped control. A source absent from the table is forwarded untouched, which is what lets
+// the wizard's "skip" mean "leave this one alone" rather than "break it".
+struct binding {
+    unsigned char source_kind;
+    unsigned short source_code;
+    signed char source_dir;
+    unsigned char target_kind;
+    unsigned short target_code;
+    signed char target_dir;
+};
+
 struct config {
     int home_as_back;
     int combo_hold_kill_app;
     int virtual_mouse;
     long long generation;
+
+    struct binding bindings[MAX_BINDINGS];
+    int binding_count;
 };
 
 /**

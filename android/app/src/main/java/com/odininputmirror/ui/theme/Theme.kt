@@ -23,6 +23,13 @@ object Palette {
     val dangerSoft = Color(0xFF4A1F28)
     val focus = Color(0xFF8EC2FF)
     val focusBg = Color(0xFF1E2A3C)
+    // Behind a prompt that owns the screen. Dark enough to say "answer this first", sheer enough to
+    // leave the row it belongs to legible underneath.
+    val scrim = Color(0xCC060A11)
+    // Reserved for a controller carrying a mapping the user captured themselves: it marks the card
+    // as "yours", distinct from the blue that means "selected".
+    val custom = Color(0xFF4ADE80)
+    val customSoft = Color(0xFF14301F)
 }
 
 private val DarkColors = darkColorScheme(

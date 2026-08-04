@@ -35,6 +35,9 @@ data class MirrorUiState(
     val docked: Boolean = false,
     val manualInternalGuid: String? = null,
     val unsupported: Boolean = false,
+    // How many controls the external controller has captured, for the card. Null when it has no
+    // identity to key a mapping on.
+    val mappedControlCount: Int? = null,
     // The service is published but never answers (Odin 2 Mini). Distinct from absent, because
     // telling that owner their device "doesn't have it" would be flatly wrong.
     val serviceUnresponsive: Boolean = false,
@@ -52,6 +55,16 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     private val _state = MutableStateFlow(MirrorUiState())
     val state: StateFlow<MirrorUiState> = _state.asStateFlow()
+
+    // Owned rather than injected as a second ViewModel: it lives and dies with this screen, and
+    // borrowing this scope is what keeps its polling tied to the same lifecycle.
+    val mappingEditor = MappingEditorController(graph, viewModelScope)
+
+    fun openMappingEditor() {
+        val device = _state.value.externalDevice ?: return
+        val key = device.mappingKey ?: return
+        mappingEditor.open(device.name, key)
+    }
 
     init {
         if (graph.isSupportedDevice) {
@@ -140,6 +153,9 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 restartWaiting = status.expectedRunning && !status.running,
                 docked = status.docked,
                 manualInternalGuid = status.manualInternalGuid,
+                mappedControlCount = externalDevice?.mappingKey?.let {
+                    graph.mappingRepository.get(it).boundControlCount
+                },
                 message = buildStatusMessage(status, available),
             )
         }

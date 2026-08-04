@@ -1,6 +1,9 @@
 package com.odininputmirror.domain.usecase
 
+import com.odininputmirror.domain.model.CaptureKind
+import com.odininputmirror.domain.model.CaptureRead
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.ControllerMapping
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.model.findSavedControllerDevice
@@ -525,12 +528,30 @@ private class FakeMirrorProcessRepository(
     var reloadDelivered = true
     var reportedGeneration: Long? = null
 
-    override fun applyLiveSettings(settings: MirrorSettings): Boolean {
+    override fun applyLiveSettings(settings: MirrorSettings, mapping: ControllerMapping): Boolean {
         liveSettingsPushes += settings
         return reloadDelivered
     }
 
     override fun appliedConfigGeneration(): Long? = reportedGeneration
+
+    val captureCommands = mutableListOf<String>()
+
+    override fun beginCapture(kind: CaptureKind): Boolean {
+        captureCommands += "begin:$kind"
+        return true
+    }
+
+    override fun endCapture(): Boolean {
+        captureCommands += "end"
+        return true
+    }
+
+    override fun readCaptures(offset: Long): CaptureRead = CaptureRead(offset = offset)
+
+    override fun clearCaptures() {
+        captureCommands += "clear"
+    }
 }
 
 private class FakeMirrorSettingsRepository(
@@ -577,6 +598,10 @@ private class FakeMirrorSettingsRepository(
 
     override fun setVirtualMouseEnabled(enabled: Boolean) {
         state = state.copy(virtualMouse = enabled)
+    }
+
+    override fun bumpConfigGeneration() {
+        state = state.copy(configGeneration = state.configGeneration + 1)
     }
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {

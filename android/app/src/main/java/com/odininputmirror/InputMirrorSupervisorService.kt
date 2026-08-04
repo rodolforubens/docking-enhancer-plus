@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.ControllerMapping
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.model.MirrorStatus
@@ -135,7 +136,10 @@ class InputMirrorSupervisorService : Service() {
                     }
                     AutoMirrorDecision.ApplyLiveSettings -> {
                         val delivered = runCatching {
-                            graph.processRepository.applyLiveSettings(settings)
+                            graph.processRepository.applyLiveSettings(
+                                settings,
+                                mappingFor(devices, settings.source),
+                            )
                         }.getOrDefault(false)
                         if (!delivered) {
                             // The daemon is alive but deaf on its control channel. Stopping it hands
@@ -149,8 +153,9 @@ class InputMirrorSupervisorService : Service() {
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }
                     is AutoMirrorDecision.Start -> {
+                        val request = decision.request.copy(mapping = mappingFor(devices, decision.request.source))
                         updateSupervisorState(SupervisorState.Starting)
-                        if (startMirror(decision.request)) {
+                        if (startMirror(request)) {
                             updateSupervisorState(SupervisorState.Active)
                         } else {
                             nextStartRetryAllowedAt = now + START_RETRY_BACKOFF_MS
@@ -159,9 +164,10 @@ class InputMirrorSupervisorService : Service() {
                         sleepMs = SUPERVISOR_INTERVAL_MS
                     }
                     is AutoMirrorDecision.Restart -> {
+                        val request = decision.request.copy(mapping = mappingFor(devices, decision.request.source))
                         updateSupervisorState(SupervisorState.Restarting)
                         runCatching { graph.stopMirror() }
-                        if (startMirror(decision.request)) {
+                        if (startMirror(request)) {
                             updateSupervisorState(SupervisorState.Active)
                         } else {
                             nextStartRetryAllowedAt = now + START_RETRY_BACKOFF_MS
@@ -212,6 +218,19 @@ class InputMirrorSupervisorService : Service() {
                 manualInternalGuid = settings.manualInternalGuid,
             ),
         )
+    }
+
+    /**
+     * The mapping saved for whichever controller is about to be mirrored.
+     *
+     * Resolved here, from the device list, because the mapping belongs to the REAL controller and
+     * only the device list knows which real device is behind the source path — the source itself is
+     * the firmware's twin, whose identity every external pad shares.
+     */
+    private fun mappingFor(devices: List<ControllerDevice>, sourcePath: String?): ControllerMapping {
+        val key = devices.firstOrNull { it.path == sourcePath }?.mappingKey
+            ?: return ControllerMapping()
+        return graph.mappingRepository.get(key)
     }
 
     private fun startMirror(request: MirrorStartRequest): Boolean {

@@ -14,8 +14,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "capture.h"
 #include "config.h"
 #include "hide_nodes.h"
+#include "mapping.h"
 
 static volatile sig_atomic_t keep_running = 1;
 static const long long COMBO_HOLD_KILL_APP_MS = 3000;
@@ -284,6 +286,39 @@ struct axis {
     int raw; // last raw value seen
 };
 
+// Record every absolute axis a device declares, with its travel, so a remapped axis can be rescaled
+// between the two controllers. Asked once per device at startup: the source is grabbed straight
+// afterwards, and neither device's ranges change while it is connected.
+static void query_axis_ranges(int fd, struct axis_range *out) {
+    unsigned long bits[(ABS_CNT + 8 * sizeof(unsigned long) - 1) / (8 * sizeof(unsigned long))];
+    memset(bits, 0, sizeof(bits));
+    if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(bits)), bits) < 0) {
+        return;
+    }
+
+    for (int code = 0; code < ABS_CNT; code++) {
+        size_t word = (size_t)code / (8 * sizeof(unsigned long));
+        unsigned long bit = 1UL << ((size_t)code % (8 * sizeof(unsigned long)));
+        if (!(bits[word] & bit)) {
+            continue;
+        }
+        struct input_absinfo info;
+        if (ioctl(fd, EVIOCGABS(code), &info) == 0 && info.maximum > info.minimum) {
+            out[code].present = 1;
+            out[code].minimum = info.minimum;
+            out[code].maximum = info.maximum;
+            // Where the axis sits untouched, asked for rather than assumed: a stick rests mid-travel
+            // and a trigger at its minimum, and a binding that pushes an axis one way has to know
+            // which end it is pushing from. Clamped because a stick held at this instant would
+            // otherwise be recorded as its own resting place.
+            int resting = info.value;
+            if (resting < info.minimum) resting = info.minimum;
+            if (resting > info.maximum) resting = info.maximum;
+            out[code].rest = resting;
+        }
+    }
+}
+
 // Populate an axis from EVIOCGABS. present stays 0 if the source lacks it or reports a null range.
 static void query_axis(int source_fd, struct axis *axis, unsigned short code) {
     struct input_absinfo info;
@@ -505,6 +540,17 @@ struct mirror_state {
     int shade_open;     // our view of whether R1 last opened the notification shade
     struct axis left_x, left_y, right_x, right_y;
 
+    // The mapping wizard's capture step, when one is open. While it is, nothing is forwarded.
+    struct capture capture;
+
+    // The mapping in force, copied out of the config so the hot path never walks the document.
+    struct mapping_table mapping;
+
+    // Both controllers' absolute travel, read once at startup: a remapped axis is rescaled between
+    // them, and the pad is grabbed afterwards so this is the only chance to ask.
+    struct axis_range source_axes[ABS_CNT];
+    struct axis_range target_axes[ABS_CNT];
+
     // Everything the TARGET currently believes held/deflected, tracked as events are forwarded, so
     // entering mouse mode can release all of it (see enter_mouse_mode).
     unsigned char key_down[KEY_CNT];
@@ -694,14 +740,28 @@ static void apply_config(struct mirror_state *s, const struct config *next) {
     s->combo_hold_kill_app = next->combo_hold_kill_app;
     s->virtual_mouse = next->virtual_mouse;
     s->config_generation = next->generation;
+
+    // Adopting a mapping needs no unwinding: it only decides what the NEXT event is forwarded as.
+    // A key already down was forwarded under the old table and will be released under the new one,
+    // which is the one case worth knowing about — and it costs a stuck key only if the user remaps
+    // mid-press, which the wizard makes impossible because it stops forwarding while it captures.
+    mapping_load(&s->mapping, next->bindings, next->binding_count);
 }
 
 // Read whatever the app queued on the control fifo and report whether a reload was asked for.
 // Commands are one per line and unknown ones are ignored, so a newer app talking to an older daemon
 // degrades to "no-op" rather than to a parse error.
-static int drain_control(int fd) {
+enum control_command {
+    CONTROL_NONE = 0,
+    CONTROL_RELOAD,
+    CONTROL_CAPTURE_BUTTON,
+    CONTROL_CAPTURE_STICK,
+    CONTROL_CAPTURE_OFF,
+};
+
+static enum control_command drain_control(int fd) {
     char buffer[256];
-    int reload = 0;
+    enum control_command command = CONTROL_NONE;
 
     for (;;) {
         ssize_t got = read(fd, buffer, sizeof(buffer) - 1);
@@ -710,12 +770,19 @@ static int drain_control(int fd) {
         }
         buffer[got] = '\0';
         // A command is a short word written in one call, and a write below PIPE_BUF is atomic, so a
-        // command never arrives split across two reads.
-        if (strstr(buffer, "reload") != NULL) {
-            reload = 1;
+        // command never arrives split across two reads. Where several arrived between polls the last
+        // one read wins, which is the state the app most recently asked for.
+        if (strstr(buffer, "capture button") != NULL) {
+            command = CONTROL_CAPTURE_BUTTON;
+        } else if (strstr(buffer, "capture stick") != NULL) {
+            command = CONTROL_CAPTURE_STICK;
+        } else if (strstr(buffer, "capture off") != NULL) {
+            command = CONTROL_CAPTURE_OFF;
+        } else if (strstr(buffer, "reload") != NULL) {
+            command = CONTROL_RELOAD;
         }
     }
-    return reload;
+    return command;
 }
 
 // Flip mouse mode if Select+R3 has been held past the threshold. Checked every loop because the hold
@@ -844,17 +911,36 @@ static void handle_mouse_event(struct mirror_state *s, const struct input_event 
 // Forward one event to the target: apply the Nintendo face-button swap, record what the target now
 // believes held/deflected (for mouse-mode entry), and write it tolerantly. Returns 0, or -1 if the
 // target write kept failing.
-static int forward_event(struct mirror_state *s, struct input_event *ev) {
-    if (s->swap_nintendo_layout && ev->type == EV_KEY) {
-        ev->code = swap_nintendo_face_button(ev->code);
+static int forward_event(struct mirror_state *s, const struct input_event *ev) {
+    // One event in, several possibly out: a mapping may change an event's very type, and more than
+    // one binding may name the same source.
+    struct input_event mapped[MAX_MAPPED_EVENTS];
+    int bound = 0;
+    int count = mapping_apply(&s->mapping, s->source_axes, s->target_axes, ev,
+                              mapped, MAX_MAPPED_EVENTS, &bound);
+
+    // The face-button swap corrects a pad whose layout we had to GUESS at. A binding is the user
+    // telling us, so it wins: swapping on top of one would invert exactly what they just set, which
+    // is maddening precisely because the editor shows the binding they wanted, working, and the pad
+    // does the opposite.
+    int swap = s->swap_nintendo_layout && !bound;
+
+    for (int i = 0; i < count; i++) {
+        struct input_event *out = &mapped[i];
+        if (swap && out->type == EV_KEY) {
+            out->code = swap_nintendo_face_button(out->code);
+        }
+        // Post-swap: this is what the TARGET believes.
+        if (out->type == EV_KEY && out->code < KEY_CNT) {
+            s->key_down[out->code] = out->value != 0;
+        } else if (out->type == EV_ABS && out->code < ABS_CNT) {
+            s->abs_last[out->code] = out->value;
+        }
+        if (write_event_tolerant(s->target_fd, out) != 0) {
+            return -1;
+        }
     }
-    // Post-swap: this is what the TARGET believes.
-    if (ev->type == EV_KEY && ev->code < KEY_CNT) {
-        s->key_down[ev->code] = ev->value != 0;
-    } else if (ev->type == EV_ABS && ev->code < ABS_CNT) {
-        s->abs_last[ev->code] = ev->value;
-    }
-    return write_event_tolerant(s->target_fd, ev);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -878,7 +964,7 @@ int main(int argc, char **argv) {
     }
 
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--config-file PATH] [--control-fifo PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--config-file PATH] [--control-fifo PATH] [--capture-file PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -889,6 +975,7 @@ int main(int argc, char **argv) {
     const char *hidden_state_path = NULL;
     const char *config_path = NULL;
     const char *control_fifo_path = NULL;
+    const char *capture_file_path = NULL;
     int home_as_back = 0;
     int combo_hold_kill_app = 0;
     int virtual_mouse = 0;
@@ -935,6 +1022,11 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (strcmp(argv[index], "--capture-file") == 0 && index + 1 < argc) {
+            capture_file_path = argv[++index];
+            continue;
+        }
+
         if (strcmp(argv[index], "--pid-file") == 0 && index + 1 < argc) {
             pid_file_path = argv[++index];
             continue;
@@ -965,6 +1057,8 @@ int main(int argc, char **argv) {
     s.home_as_back = home_as_back;
     s.combo_hold_kill_app = combo_hold_kill_app;
     s.virtual_mouse = virtual_mouse;
+    s.capture.first_axis = -1;
+    s.capture.log_path = capture_file_path;
     s.last_frame_ms = now_ms();
 
     s.source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
@@ -1025,6 +1119,11 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Both sides' axis travel, for rescaling a remapped axis between controllers that disagree about
+    // their ranges (a trigger reporting 0..255 into one expecting -32767..32767, say).
+    query_axis_ranges(s.source_fd, s.source_axes);
+    query_axis_ranges(s.target_fd, s.target_axes);
+
     // A config file, when present, is the authority; the command-line flags are only what to start
     // from if it is missing or unreadable. Reading it here also means a daemon restarted for an
     // unrelated reason (a reconnect, a crash) comes back with whatever the user last chose rather
@@ -1082,6 +1181,12 @@ int main(int argc, char **argv) {
         int timeout_ms = compute_loop_timeout(&s);
 
         long long heartbeat_now_ms = now_ms();
+        // A daemon left capturing forwards nothing, so an app that died mid-wizard would leave the
+        // controller mute with no way to revive it from the controller itself.
+        if (capture_expired(&s.capture, heartbeat_now_ms)) {
+            fprintf(stderr, "capture: no command in 30s; resuming forwarding\n");
+            capture_end(&s.capture);
+        }
         if (heartbeat_now_ms - s.last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
             write_heartbeat(&s);
             s.last_heartbeat_ms = heartbeat_now_ms;
@@ -1121,7 +1226,18 @@ int main(int argc, char **argv) {
 
         // Settings first: applying them before this batch of events means the events are handled
         // under the config the user has already asked for, never under the one they just replaced.
-        if (control_index >= 0 && (fds[control_index].revents & POLLIN) && drain_control(s.control_fd)) {
+        enum control_command command = CONTROL_NONE;
+        if (control_index >= 0 && (fds[control_index].revents & POLLIN)) {
+            command = drain_control(s.control_fd);
+        }
+        if (command == CONTROL_CAPTURE_BUTTON) {
+            capture_begin(&s.capture, CAPTURE_BUTTON, now_ms());
+        } else if (command == CONTROL_CAPTURE_STICK) {
+            capture_begin(&s.capture, CAPTURE_STICK, now_ms());
+        } else if (command == CONTROL_CAPTURE_OFF) {
+            capture_end(&s.capture);
+        }
+        if (command == CONTROL_RELOAD) {
             struct config running = {
                 .home_as_back = s.home_as_back,
                 .combo_hold_kill_app = s.combo_hold_kill_app,
@@ -1136,6 +1252,21 @@ int main(int argc, char **argv) {
                 // waiting for never shows up in the heartbeat, and can put its toggle back.
                 fprintf(stderr, "reload: keeping the running config\n");
             }
+        }
+
+        // The controller went away: unplugged, powered off, or dropped its Bluetooth link.
+        //
+        // This has to end the run rather than be waited out. A dead source never reports POLLIN
+        // again, only POLLERR/POLLHUP, so treating "not readable" as "nothing to do" left the daemon
+        // spinning forever — alive, still beating its heartbeat, still holding the node hidden, and
+        // forwarding nothing. The app read that heartbeat and reported a healthy mirror, which is the
+        // worst possible answer: the user sees "on" and the pad does nothing. Leaving through the
+        // normal shutdown puts the hidden node back and lets the supervisor start a fresh daemon on
+        // whatever node the controller comes back as.
+        if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            fprintf(stderr, "source %s went away (revents 0x%x); shutting down\n",
+                    source_path, fds[0].revents);
+            break;
         }
 
         if (!(fds[0].revents & POLLIN)) {
@@ -1167,6 +1298,12 @@ int main(int argc, char **argv) {
         int fatal_write_error = 0;
         for (size_t i = 0; i < event_count; i++) {
             struct input_event *event = &events[i];
+
+            // Capture first and alone: while the wizard has a step open the controller drives the
+            // wizard and nothing else — not the combos, not the mouse, and above all not the target.
+            if (capture_feed(&s.capture, event, s.source_axes, s.abs_neutral, now_ms())) {
+                continue;
+            }
 
             // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
             if (event->type == EV_KEY) {

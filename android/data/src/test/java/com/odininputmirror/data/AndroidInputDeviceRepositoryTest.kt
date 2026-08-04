@@ -1,6 +1,7 @@
 package com.odininputmirror.data
 
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.MappingKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -418,6 +419,48 @@ class AndroidInputDeviceRepositoryTest {
         isInternal = isInternal,
         isKnownInternal = isKnownInternal,
     )
+
+    @Test
+    fun mappingKeyComesFromTheRealDeviceNotTheFirmwaresTwin() {
+        // The firmware republishes the pad as a 0x2020 twin and deletes the original node. Both
+        // entries carry the same name; only the real one carries an identity worth keying on.
+        val entries = listOf(
+            procEntry("8BitDo Ultimate 2C Wireless", BUS_BLUETOOTH, 0x2dc8, 0x301b),
+            procEntry("8BitDo Ultimate 2C Wireless", BUS_USB, 0x2020, 0x0111),
+        )
+
+        assertEquals(
+            MappingKey("2dc8:301b"),
+            repository.resolveMappingKey("8BitDo Ultimate 2C Wireless", entries),
+        )
+    }
+
+    @Test
+    fun twoDifferentPadsGetDifferentMappingKeysDespiteSharingAGuid() {
+        // The regression this exists to prevent: both twins are 2020:0111, so keying on the twin
+        // would hand the second pad the first pad's mapping.
+        val entries = listOf(
+            procEntry("8BitDo Ultimate 2C Wireless", BUS_BLUETOOTH, 0x2dc8, 0x301b),
+            procEntry("8BitDo Ultimate 2C Wireless", BUS_USB, 0x2020, 0x0111),
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13),
+            procEntry("Xbox Wireless Controller", BUS_USB, 0x2020, 0x0111),
+        )
+
+        val first = repository.resolveMappingKey("8BitDo Ultimate 2C Wireless", entries)
+        val second = repository.resolveMappingKey("Xbox Wireless Controller", entries)
+
+        assertEquals(MappingKey("2dc8:301b"), first)
+        assertEquals(MappingKey("045e:0b13"), second)
+    }
+
+    @Test
+    fun mappingKeyIsNullWhenOnlyTheQuirkEntryExists() {
+        // The internal controller IS the quirk vendor: there is no real device behind it to key on,
+        // and it is never the controller being remapped.
+        val entries = listOf(procEntry("Xbox Wireless Controller", BUS_USB, 0x2020, 0x0112))
+
+        assertNull(repository.resolveMappingKey("Xbox Wireless Controller", entries))
+    }
 
     private fun procEntry(
         name: String,

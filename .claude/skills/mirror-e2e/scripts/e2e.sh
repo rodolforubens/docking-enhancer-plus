@@ -250,7 +250,14 @@ write_config() {
 }
 # El daemon mantiene el fifo abierto en O_RDWR, asi que siempre hay lector; el timeout esta para que
 # un daemon muerto a mitad del test falle en vez de colgar la suite entera.
-poke() { timeout 2 sh -c "echo reload > $FIFO"; }
+poke() { poke_cmd reload; }
+# Cualquier comando del canal de control. El daemon mantiene el fifo abierto en O_RDWR, asi que
+# siempre hay lector; el timeout esta para que un daemon muerto falle en vez de colgar la suite.
+poke_cmd() { timeout 2 sh -c "echo '$1' > $FIFO"; }
+# Una pulsacion completa en el pad sintetico de origen (fd 3 es su stdin).
+press_source() { echo "key $1 1" >&3; echo "syn" >&3; echo "key $1 0" >&3; echo "syn" >&3; }
+# Un eje del pad de origen a un valor concreto. Los ejes van de -32768 a 32767 con reposo en 0.
+move_source() { echo "abs $1 $2" >&3; echo "syn" >&3; }
 
 write_config 1 false
 start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --hidden-state-file $STATE --heartbeat-file $HEART
@@ -285,6 +292,260 @@ else
     stop_mirror
 fi
 rm -f $CFG $FIFO
+
+# --- T7: capture mode ----------------------------------------------------------------------------
+
+echo ""
+echo "=== T7: la captura reporta y no reenvia ==="
+
+CAPLOG=$TMP/capture.log
+rm -f $CAPLOG $CFG $FIFO
+mkfifo $FIFO 2>/dev/null
+write_config 1 false
+
+start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --capture-file $CAPLOG --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para el test de captura"
+else
+    poke_cmd "capture button"
+    sleep 0.5
+
+    # Con la captura abierta, un boton tiene que aparecer en el log y NO llegar al target: apretar A
+    # para mapearla no puede disparar A en lo que este en pantalla.
+    timeout 3 getevent -lc 4 "$DST" > $TMP/t7.out 2>&1 &
+    T7GE=$!
+    sleep 0.4
+    press_source 304
+    sleep 1.5
+    kill $T7GE 2>/dev/null
+
+    expect_contains $CAPLOG "button 304" "reporta el codigo apretado"
+    if [ -s $TMP/t7.out ]; then
+        bad "reenvio al target mientras capturaba"
+    else
+        ok "no reenvia nada mientras captura"
+    fi
+
+    # El latch: una segunda pulsacion no agrega otra linea hasta que se pida el paso siguiente.
+    press_source 305
+    sleep 1
+    if [ "$(wc -l < $CAPLOG)" = "1" ]; then
+        ok "el latch retiene hasta el proximo paso"
+    else
+        bad "el latch no retuvo ($(wc -l < $CAPLOG) lineas)"
+    fi
+
+    poke_cmd "capture off"
+    sleep 0.5
+    rm -f $TMP/t7.out
+    timeout 3 getevent -lc 4 "$DST" > $TMP/t7.out 2>&1 &
+    T7GE=$!
+    sleep 0.4
+    press_source 304
+    sleep 1.5
+    kill $T7GE 2>/dev/null
+    expect_contains $TMP/t7.out "BTN_GAMEPAD" "vuelve a reenviar al cerrar la captura"
+
+    stop_mirror
+fi
+rm -f $CAPLOG $TMP/t7.out
+
+# --- T8: el mapeo remapea ------------------------------------------------------------------------
+
+echo ""
+echo "=== T8: un mapeo en la config cambia el codigo reenviado ==="
+
+# 304 (BTN_SOUTH) -> 307 (BTN_NORTH); 305 queda sin mapear y tiene que pasar intacto.
+cat > $CFG.tmp <<'EOF'
+{
+  "generation": 1,
+  "home_as_back": false,
+  "combo_hold_kill_app": false,
+  "virtual_mouse": false,
+  "mapping": { "bindings": [[0, 304, 0, 0, 307, 0]] }
+}
+EOF
+mv $CFG.tmp $CFG
+
+start_mirror "$SRC" "$DST" --config-file $CFG --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para el test de mapeo"
+else
+    timeout 4 getevent -lc 8 "$DST" > $TMP/t8.out 2>&1 &
+    T8GE=$!
+    sleep 0.5
+    press_source 304
+    press_source 305
+    sleep 2
+    kill $T8GE 2>/dev/null
+
+    expect_contains $TMP/t8.out "BTN_NORTH" "el codigo mapeado llega remapeado"
+    expect_contains $TMP/t8.out "BTN_EAST" "el codigo sin mapear pasa intacto"
+    # getevent nombra 0x130 como BTN_GAMEPAD; si aparece, el mapeo no se aplico.
+    if grep -q "BTN_GAMEPAD" $TMP/t8.out 2>/dev/null; then
+        bad "llego el codigo ORIGINAL: el mapeo no se aplico"
+    else
+        ok "el codigo original no llega"
+    fi
+
+    stop_mirror
+fi
+rm -f $TMP/t8.out $CFG $FIFO
+
+# --- T9: un eje llena un slot de boton --------------------------------------------------------------
+
+echo ""
+echo "=== T9: media travesia de un eje llega como boton ==="
+
+# Lo que la division vieja (una tabla de botones, otra de ejes, sin puente) no podia expresar: el
+# gatillo de un pad que lo reporta como eje ocupando el slot de un boton.
+# [kind=2 (media travesia), ABS_Z, +1] -> [kind=0 (boton), BTN_NORTH]
+cat > $CFG.tmp <<'EOF'
+{
+  "generation": 1,
+  "home_as_back": false,
+  "combo_hold_kill_app": false,
+  "virtual_mouse": false,
+  "mapping": { "bindings": [[2, 2, 1, 0, 307, 0]] }
+}
+EOF
+mv $CFG.tmp $CFG
+
+start_mirror "$SRC" "$DST" --config-file $CFG --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para el test de eje-a-boton"
+else
+    # Primero por debajo del umbral: un gatillo apenas rozado no puede contar como apretado, o el
+    # boton castanetea con el ruido del sensor.
+    timeout 4 getevent -lc 6 "$DST" > $TMP/t9a.out 2>&1 &
+    T9GE=$!
+    sleep 0.5
+    move_source 2 5000
+    sleep 1.5
+    kill $T9GE 2>/dev/null
+    if grep -q "BTN_NORTH" $TMP/t9a.out 2>/dev/null; then
+        bad "un roce del eje ya disparo el boton"
+    else
+        ok "por debajo del umbral no dispara"
+    fi
+
+    # Y ahora hasta el fondo.
+    timeout 4 getevent -lc 8 "$DST" > $TMP/t9b.out 2>&1 &
+    T9GE=$!
+    sleep 0.5
+    move_source 2 30000
+    sleep 0.6
+    move_source 2 0
+    sleep 1.5
+    kill $T9GE 2>/dev/null
+
+    expect_contains $TMP/t9b.out "BTN_NORTH" "pasado el umbral llega como boton"
+    # El evento de eje se consume: lo que el target ve es el boton, no las dos cosas.
+    if grep -q "ABS_Z" $TMP/t9b.out 2>/dev/null; then
+        bad "el eje original tambien llego al target"
+    else
+        ok "el eje original no llega"
+    fi
+    # Bajada y subida: sin la de vuelta el boton queda trabado apretado para siempre.
+    if [ "$(grep -c "BTN_NORTH" $TMP/t9b.out 2>/dev/null)" = "2" ]; then
+        ok "suelta el boton al volver el eje a reposo"
+    else
+        bad "no emitio el par apretar/soltar ($(grep -c "BTN_NORTH" $TMP/t9b.out 2>/dev/null) eventos)"
+    fi
+
+    stop_mirror
+fi
+rm -f $TMP/t9a.out $TMP/t9b.out $CFG
+
+# --- T10: un boton llena una direccion de stick -----------------------------------------------------
+
+echo ""
+echo "=== T10: un boton llega como deflexion completa de un eje ==="
+
+# El cruce inverso: [kind=0 (boton), BTN_SOUTH] -> [kind=2 (media travesia), ABS_RX, +1].
+cat > $CFG.tmp <<'EOF'
+{
+  "generation": 1,
+  "home_as_back": false,
+  "combo_hold_kill_app": false,
+  "virtual_mouse": false,
+  "mapping": { "bindings": [[0, 304, 0, 2, 3, 1]] }
+}
+EOF
+mv $CFG.tmp $CFG
+
+start_mirror "$SRC" "$DST" --config-file $CFG --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para el test de boton-a-eje"
+else
+    timeout 4 getevent -lc 8 "$DST" > $TMP/t10.out 2>&1 &
+    T10GE=$!
+    sleep 0.5
+    press_source 304
+    sleep 1.5
+    kill $T10GE 2>/dev/null
+
+    # Una fuente digital no tiene medias tintas: da el tope del recorrido, 32767 = 0x7fff.
+    expect_contains $TMP/t10.out "ABS_RX" "el boton llega como eje"
+    expect_contains $TMP/t10.out "00007fff" "y con la deflexion al tope"
+    # Y vuelve a reposo al soltar, o el stick queda clavado contra el borde.
+    expect_contains $TMP/t10.out "00000000" "vuelve a reposo al soltar"
+    if grep -q "BTN_GAMEPAD" $TMP/t10.out 2>/dev/null; then
+        bad "el boton original tambien llego al target"
+    else
+        ok "el boton original no llega"
+    fi
+
+    stop_mirror
+fi
+rm -f $TMP/t10.out $CFG $FIFO
+
+# --- T11: la captura no puede dejar el pad mudo -----------------------------------------------------
+
+echo ""
+echo "=== T11: una captura abandonada expira sola ==="
+
+# Mientras hay un paso abierto el daemon no reenvia NADA. Si la app se cae ahi, el pad queda mudo y
+# no hay forma de revivirlo desde el pad mismo — el timeout es la unica salida. Tarda sus 30s reales
+# porque es lo que se esta probando; no hay forma honesta de acelerarlo.
+rm -f $CFG $FIFO
+mkfifo $FIFO 2>/dev/null
+write_config 1 false
+
+start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --capture-file $TMP/t11.cap --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para el test de expiracion"
+else
+    poke_cmd "capture button"
+    sleep 0.5
+
+    # Confirmar primero que efectivamente esta mudo, o el test pasaria aunque la captura ni se abrio.
+    timeout 3 getevent -lc 4 "$DST" > $TMP/t11a.out 2>&1 &
+    T11GE=$!
+    sleep 0.4
+    press_source 304
+    sleep 1.5
+    kill $T11GE 2>/dev/null
+    if [ -s $TMP/t11a.out ]; then
+        bad "la captura ni siquiera silencio el pad"
+    else
+        ok "con la captura abierta el pad esta mudo"
+    fi
+
+    echo "  (esperando los 30s del timeout...)"
+    sleep 31
+
+    timeout 4 getevent -lc 4 "$DST" > $TMP/t11b.out 2>&1 &
+    T11GE=$!
+    sleep 0.4
+    press_source 304
+    sleep 1.5
+    kill $T11GE 2>/dev/null
+    expect_contains $TMP/t11b.out "BTN_GAMEPAD" "el pad revive solo sin que nadie cierre la captura"
+
+    stop_mirror
+fi
+rm -f $TMP/t11.cap $TMP/t11a.out $TMP/t11b.out $CFG $FIFO
 
 # --- teardown ------------------------------------------------------------------------------------
 

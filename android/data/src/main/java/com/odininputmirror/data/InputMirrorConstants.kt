@@ -52,15 +52,24 @@ internal const val KEY_CONFIG_GENERATION = "config_generation"
 internal const val KEY_EXPECTED_RUNNING = "expected_running"
 internal const val KEY_STARTED_AT = "started_at"
 internal const val KEY_MANUAL_INTERNAL_GUID = "manual_internal_guid"
+// Namespace for per-controller mappings, keyed by the REAL device's vendor:product. Namespaced
+// because these share a preferences file with the mirror's own settings.
+internal const val KEY_MAPPING_PREFIX = "mapping_"
 
 internal const val STARTING_GRACE_MS = 1500L
 internal const val HEARTBEAT_STALE_MS = 5000L
 // Line prefix the daemon uses to acknowledge the config it is actually running. Line 1 of the
 // heartbeat stays the timestamp the liveness check reads; everything after is "key value" pairs.
 internal const val GENERATION_PREFIX = "generation "
-// The one command the control fifo carries today. It is a channel rather than a signal precisely so
-// that pause/resume and the mapping wizard's capture mode can join it without new machinery.
+// Commands the control fifo carries. It is a channel rather than a signal precisely so that the
+// mapping wizard's capture steps could join it without any new machinery.
 internal const val RELOAD_COMMAND = "reload\n"
+// The daemon stops forwarding while a capture step is open — pressing A to map it must not also
+// press A in whatever is on screen — and closes the step on its own after 30s, so a wizard that
+// crashed cannot leave the controller mute.
+internal const val CAPTURE_BUTTON_COMMAND = "capture button\n"
+internal const val CAPTURE_STICK_COMMAND = "capture stick\n"
+internal const val CAPTURE_OFF_COMMAND = "capture off\n"
 // Give the daemon time to run its cleanup (restore hidden nodes, destroy uinput devices) on SIGTERM
 // before escalating to SIGKILL. 0.5s comfortably covers the restore (a handful of syscalls) even
 // under load, so a stop never orphans a hidden node.
