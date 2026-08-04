@@ -1,6 +1,5 @@
 package com.odininputmirror.ui
 
-import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.Binding
 import com.odininputmirror.domain.model.CaptureKind
 import com.odininputmirror.domain.model.CaptureResult
@@ -10,9 +9,14 @@ import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.MappingSlot
 import com.odininputmirror.domain.model.mappingSlots
 import com.odininputmirror.domain.model.odinFallbackTraits
+import com.odininputmirror.domain.repository.InputDeviceRepository
+import com.odininputmirror.domain.repository.MappingRepository
+import com.odininputmirror.domain.repository.MirrorProcessRepository
+import com.odininputmirror.domain.repository.MirrorSettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +54,12 @@ data class MappingEditorUiState(
  * case the expensive one. Here an untouched slot costs nothing and means exactly what it looks like.
  */
 class MappingEditorController(
-    private val graph: InputMirrorGraph,
+    private val mappings: MappingRepository,
+    private val devices: InputDeviceRepository,
+    private val process: MirrorProcessRepository,
+    private val settings: MirrorSettingsRepository,
+    /** Hands a pad the user has never mapped its bundled-database default. Safe to repeat. */
+    private val seedDefaultMapping: (MappingKey) -> Unit,
     private val scope: CoroutineScope,
     /** Called once the mapping has been written, so whatever displays it can catch up. */
     private val onMappingChanged: () -> Unit = {},
@@ -59,7 +68,6 @@ class MappingEditorController(
     val state: StateFlow<MappingEditorUiState> = _state.asStateFlow()
 
     private var poller: Job? = null
-    private var captureOffset = 0L
     private var mappingKey: MappingKey? = null
 
     /** What was saved when the editor opened, to tell a real edit from a look around. */
@@ -74,7 +82,6 @@ class MappingEditorController(
     fun open(controllerName: String, key: MappingKey) {
         if (_state.value.open) return
         mappingKey = key
-        captureOffset = 0L
         scope.launch {
             // Opened on what is already saved, not on a blank slate: the list has to show the user
             // what their pad does today before it can be somewhere they change it.
@@ -84,10 +91,10 @@ class MappingEditorController(
             val (saved, slots) = withContext(Dispatchers.IO) {
                 // The supervisor normally seeds before the mirror ever starts; repeating it here
                 // covers an editor opened before any start. A no-op for a pad already mapped.
-                graph.seedDefaultMapping(key)
-                val mapping = graph.mappingRepository.get(key)
-                seededOnOpen = runCatching { graph.mappingRepository.isSeeded(key) }.getOrDefault(false)
-                val traits = runCatching { graph.inputDeviceRepository.targetTraits() }.getOrNull()
+                seedDefaultMapping(key)
+                val mapping = mappings.get(key)
+                seededOnOpen = runCatching { mappings.isSeeded(key) }.getOrDefault(false)
+                val traits = runCatching { devices.targetTraits() }.getOrNull()
                 mapping to mappingSlots(traits ?: odinFallbackTraits())
             }
 
@@ -118,14 +125,13 @@ class MappingEditorController(
     fun bind(slot: MappingSlot) {
         if (!_state.value.open) return
         _state.update { it.copy(capturing = slot, notice = null) }
-        openCapture()
-        startPolling()
+        startCapture()
     }
 
     /** Close the overlay without changing anything. */
     fun cancelBind() {
         stopPolling()
-        scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
+        scope.launch(Dispatchers.IO) { process.endCapture() }
         _state.update { it.copy(capturing = null, notice = null) }
     }
 
@@ -136,7 +142,7 @@ class MappingEditorController(
             it.copy(bindings = it.bindings - slot.target, capturing = null, notice = null, seeded = false)
         }
         stopPolling()
-        scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
+        scope.launch(Dispatchers.IO) { process.endCapture() }
     }
 
     /** Throw the whole mapping away. Stays open, so the user can see it emptied and start over. */
@@ -146,7 +152,7 @@ class MappingEditorController(
         // No longer "the profile as it came": what is on screen is the user's doing from here on,
         // even though clearing it all is what will hand the profile back on the way out.
         _state.update { it.copy(bindings = emptyMap(), capturing = null, notice = null, seeded = false) }
-        scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
+        scope.launch(Dispatchers.IO) { process.endCapture() }
     }
 
     /**
@@ -165,26 +171,32 @@ class MappingEditorController(
         val edited = bindings != openedWith || purgedOnOpen
 
         scope.launch(Dispatchers.IO) {
-            graph.processRepository.endCapture()
+            process.endCapture()
             if (key != null && edited) {
-                val mapping = ControllerMapping(bindings.map { Binding(it.value, it.key) })
-                if (mapping.isEmpty) {
-                    graph.mappingRepository.clear(key)
-                    // Clearing everything means "back to how this should be", and for a pad the
-                    // database knows, that is its profile. Restored HERE rather than at the next
-                    // mirror start: otherwise the card sits badge-less claiming the pad has no
-                    // mapping while it is about to be handed one, and the pad stays unmapped until
-                    // something unrelated happens to restart the daemon. A pad the database does not
-                    // know seeds nothing and stays genuinely cleared.
-                    graph.seedDefaultMapping(key)
-                } else {
-                    graph.mappingRepository.save(key, mapping)
-                    // Whatever this was before, it is the user's now.
-                    graph.mappingRepository.setSeeded(key, false)
+                // Written as ONE indivisible unit. This scope belongs to the screen, and the screen
+                // closing is precisely what runs this — so a cancel landing between the save and the
+                // bump stored the mapping and told nobody: the badge showed the new mapping while the
+                // pad went on using the old one until something unrelated restarted the daemon.
+                withContext(NonCancellable) {
+                    val mapping = ControllerMapping(bindings.map { Binding(it.value, it.key) })
+                    if (mapping.isEmpty) {
+                        mappings.clear(key)
+                        // Clearing everything means "back to how this should be", and for a pad the
+                        // database knows, that is its profile. Restored HERE rather than at the next
+                        // mirror start: otherwise the card sits badge-less claiming the pad has no
+                        // mapping while it is about to be handed one, and the pad stays unmapped until
+                        // something unrelated happens to restart the daemon. A pad the database does not
+                        // know seeds nothing and stays genuinely cleared.
+                        seedDefaultMapping(key)
+                    } else {
+                        mappings.save(key, mapping)
+                        // Whatever this was before, it is the user's now.
+                        mappings.setSeeded(key, false)
+                    }
+                    // Advancing the generation is what makes the supervisor push the new config on its
+                    // next tick — the same path a toggle takes, so the daemon adopts it without a restart.
+                    settings.bumpConfigGeneration()
                 }
-                // Advancing the generation is what makes the supervisor push the new config on its
-                // next tick — the same path a toggle takes, so the daemon adopts it without a restart.
-                graph.settingsRepository.bumpConfigGeneration()
             }
             // After the write, not before: the badge is read straight back out of storage.
             withContext(Dispatchers.Main) { onMappingChanged() }
@@ -192,27 +204,47 @@ class MappingEditorController(
         _state.value = MappingEditorUiState()
     }
 
-    private fun openCapture() {
-        scope.launch(Dispatchers.IO) {
-            graph.processRepository.clearCaptures()
-            captureOffset = 0L
+    /**
+     * Open a capture on the daemon and poll it until something fills the slot.
+     *
+     * Opening and polling are ONE coroutine deliberately. As two they were unordered, so the poller
+     * could read the log — and advance its offset past the end of it — before `clearCaptures` had
+     * emptied it, handing the new slot a press left over from the previous one. Sequencing them also
+     * makes the offset a local, which is the strongest form of "not shared".
+     *
+     * Polling rather than a callback because the daemon speaks through a file. 80ms is well under
+     * what reads as instant for a button press, and nothing is being forwarded meanwhile anyway.
+     */
+    private fun startCapture() {
+        poller?.cancel()
+        poller = scope.launch(Dispatchers.IO) {
+            process.clearCaptures()
+            var offset = 0L
             // Always the button mode, even for a stick direction: what a slot wants is one control
             // pushed one way, and that is exactly what this mode reports — a code for a button, a
             // code and a direction for an axis.
-            graph.processRepository.beginCapture(CaptureKind.BUTTON)
-        }
-    }
+            process.beginCapture(CaptureKind.BUTTON)
 
-    // Polling rather than a callback because the daemon speaks through a file. 80ms is well under
-    // what reads as instant for a button press, and nothing is being forwarded meanwhile anyway.
-    private fun startPolling() {
-        poller?.cancel()
-        poller = scope.launch(Dispatchers.IO) {
             while (isActive && _state.value.capturing != null) {
-                val read = graph.processRepository.readCaptures(captureOffset)
-                captureOffset = read.offset
-                read.results.firstOrNull()?.let { result ->
-                    withContext(Dispatchers.Main) { accept(result) }
+                val read = process.readCaptures(offset)
+                offset = read.offset
+                val result = read.results.firstOrNull()
+                if (result != null) {
+                    when (withContext(Dispatchers.Main) { accept(result) }) {
+                        CaptureVerdict.Accepted -> {
+                            process.endCapture()
+                            return@launch
+                        }
+                        // Reopen: the daemon latches as soon as it has a result, so without this the
+                        // overlay would sit there refusing to see the next press. Done HERE rather
+                        // than from accept() so it cannot race the loop that is still reading.
+                        CaptureVerdict.Refused -> {
+                            process.clearCaptures()
+                            offset = 0L
+                            process.beginCapture(CaptureKind.BUTTON)
+                        }
+                        CaptureVerdict.Ignored -> Unit
+                    }
                 }
                 delay(POLL_INTERVAL_MS)
             }
@@ -224,14 +256,33 @@ class MappingEditorController(
         poller = null
     }
 
-    private fun accept(result: CaptureResult) {
-        val slot = _state.value.capturing ?: return
+    /** What the capture loop should do next with the press it just handed over. */
+    private enum class CaptureVerdict {
+        /** It filled the slot; the capture is finished. */
+        Accepted,
+
+        /** The control belongs to another slot; reopen and wait for a different press. */
+        Refused,
+
+        /** Nothing this mode can use; keep waiting. */
+        Ignored,
+    }
+
+    /**
+     * Fold one press into the slot being bound, and say what the loop should do next.
+     *
+     * Returns a verdict rather than acting: it runs ON the capture coroutine (via the main
+     * dispatcher), so cancelling the poller or reopening the capture from in here would be the loop
+     * reaching around itself — in the reopen case, resetting the offset of a read still in flight.
+     */
+    private fun accept(result: CaptureResult): CaptureVerdict {
+        val slot = _state.value.capturing ?: return CaptureVerdict.Ignored
         val source = when (result) {
             is CaptureResult.Button -> ControlRef.button(result.code)
             // The pad reports this control as an axis — a trigger, usually, or a stick being pushed
             // at a slot. Half of that axis's travel is the source, so it fills any slot properly.
             is CaptureResult.AxisButton -> ControlRef.half(result.code, result.sign)
-            is CaptureResult.Stick -> return
+            is CaptureResult.Stick -> return CaptureVerdict.Ignored
         }
 
         // Refusing beats stealing. Letting the newer binding win silently is how a user ends up with
@@ -243,14 +294,9 @@ class MappingEditorController(
         if (taken != null) {
             val owner = _state.value.slots.firstOrNull { it.target == taken.key }?.label ?: "another slot"
             _state.update { it.copy(notice = "That control is already bound to $owner") }
-            // Reopen: the daemon latches as soon as it has a result, so without this the overlay
-            // would sit there refusing to see the next press.
-            openCapture()
-            return
+            return CaptureVerdict.Refused
         }
 
-        stopPolling()
-        scope.launch(Dispatchers.IO) { graph.processRepository.endCapture() }
         _state.update {
             it.copy(
                 bindings = it.bindings + (slot.target to source),
@@ -259,6 +305,7 @@ class MappingEditorController(
                 seeded = false,
             )
         }
+        return CaptureVerdict.Accepted
     }
 
     private companion object {

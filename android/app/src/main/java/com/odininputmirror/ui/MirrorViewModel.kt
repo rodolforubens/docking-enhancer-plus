@@ -55,11 +55,12 @@ data class MirrorUiState(
 }
 
 class MirrorViewModel(private val appContext: Context) : ViewModel() {
-    // Same dock-mode answer as the supervisor's graph, deliberately. They are two graphs reading the
-    // same thing, and when only one was told to force dock mode the screen flipped to "undocked" the
-    // moment anything made it re-read for itself — telling the user the dock had gone while the
-    // supervisor happily went on mirroring.
-    private val graph = InputMirrorGraph(appContext, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
+    // Literally the same graph the supervisor uses, not a second one configured to match. They have
+    // to agree about whether a dock is present — when only one was told to force dock mode the screen
+    // flipped to "undocked" the moment anything made it re-read, telling the user the dock had gone
+    // while the supervisor happily went on mirroring — and sharing it also means one cached PServer
+    // verdict and one seeding cache instead of two that can disagree.
+    private val graph = InputMirrorGraph.of(appContext, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
 
     private val _state = MutableStateFlow(MirrorUiState())
     val state: StateFlow<MirrorUiState> = _state.asStateFlow()
@@ -67,7 +68,11 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     // Owned rather than injected as a second ViewModel: it lives and dies with this screen, and
     // borrowing this scope is what keeps its polling tied to the same lifecycle.
     val mappingEditor = MappingEditorController(
-        graph = graph,
+        mappings = graph.mappingRepository,
+        devices = graph.inputDeviceRepository,
+        process = graph.processRepository,
+        settings = graph.settingsRepository,
+        seedDefaultMapping = graph::seedDefaultMapping,
         scope = viewModelScope,
         // Fired once the editor has finished writing, so the card's badge reflects what was just
         // saved instead of waiting for a supervisor snapshot that a mapping edit never triggers.
@@ -81,30 +86,33 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     }
 
     init {
-        if (graph.isSupportedDevice) {
-            startSupervisor()
-            viewModelScope.launch {
-                // Cold start: the supervisor may not have published a snapshot yet, so read once
-                // directly to fill the screen immediately. Then observe the shared snapshot the
-                // supervisor keeps fresh — the UI no longer runs its own PServer poll loop in
-                // parallel with the service.
-                if (MirrorStateStore.snapshot.value == null) {
-                    initialLoad()
-                }
-                MirrorStateStore.snapshot.collect { snapshot ->
-                    if (snapshot != null) {
-                        applyStatus(snapshot.status, snapshot.devices)
-                        _state.update { it.copy(loading = false) }
-                    }
-                }
+        viewModelScope.launch {
+            // Off the main thread: establishing this costs a binder transact the first time, and on
+            // a device that publishes PServerBinder without answering it that transact hangs until it
+            // fails. It used to run right here, in the ViewModel's constructor, on the UI thread.
+            val support = withContext(Dispatchers.IO) {
+                graph.isSupportedDevice to graph.isServiceUnresponsive
             }
-        } else {
-            _state.update {
-                it.copy(
-                    loading = false,
-                    unsupported = true,
-                    serviceUnresponsive = graph.isServiceUnresponsive,
-                )
+            if (!support.first) {
+                _state.update {
+                    it.copy(loading = false, unsupported = true, serviceUnresponsive = support.second)
+                }
+                return@launch
+            }
+
+            startSupervisor()
+            // Cold start: the supervisor may not have published a snapshot yet, so read once
+            // directly to fill the screen immediately. Then observe the shared snapshot the
+            // supervisor keeps fresh — the UI no longer runs its own PServer poll loop in
+            // parallel with the service.
+            if (MirrorStateStore.snapshot.value == null) {
+                initialLoad()
+            }
+            MirrorStateStore.snapshot.collect { snapshot ->
+                if (snapshot != null) {
+                    applyStatus(snapshot.status, snapshot.devices)
+                    _state.update { it.copy(loading = false) }
+                }
             }
         }
     }

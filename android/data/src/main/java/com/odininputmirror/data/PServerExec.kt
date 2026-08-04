@@ -128,8 +128,20 @@ internal class PServerExec : PServerTransactor {
             ?.trim()
             ?.let { if (it == "null") null else it }
 
-    private companion object {
-        const val SERVICE_NAME = "PServerBinder"
-        const val TRANSACTION_EXEC = 0
+    companion object {
+        /**
+         * One per process.
+         *
+         * [isAvailable] caches its verdict, but the cache lives on the instance — so a fresh
+         * PServerExec per caller threw that away and paid the blocking probe transact again. With
+         * the supervisor, the screen and the two startup entry points each building their own, the
+         * device was probed several times over at process start, on the main thread, and on hardware
+         * where the service is registered but dead (the Odin 2 Mini) every one of those was a
+         * synchronous call into a system service that never answers.
+         */
+        val shared: PServerExec by lazy { PServerExec() }
+
+        private const val SERVICE_NAME = "PServerBinder"
+        private const val TRANSACTION_EXEC = 0
     }
 }

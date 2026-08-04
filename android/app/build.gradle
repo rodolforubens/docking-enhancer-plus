@@ -37,6 +37,13 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        // The classes under test here are the supervisor's shared state and the editor's state
+        // machine, both plain Kotlin. Stubbing the framework calls they never make keeps them
+        // testable on the JVM without pulling in Robolectric. Same setting as :data.
+        unitTests.returnDefaultValues = true
+    }
+
     signingConfigs {
         release {
             if (keystorePropertiesFile.exists()) {
@@ -83,4 +90,7 @@ dependencies {
     implementation libs.androidx.ui.tooling.preview
     implementation libs.androidx.material3
     debugImplementation libs.androidx.ui.tooling
+
+    testImplementation libs.junit
+    testImplementation libs.kotlinx.coroutines.test
 }

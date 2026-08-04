@@ -186,23 +186,30 @@ internal class RootMirrorProcessRepository(
             return CaptureRead(offset = length)
         }
 
-        val text = runCatching {
+        val bytes = runCatching {
             file.inputStream().use { stream ->
-                stream.skip(start)
-                stream.readBytes().decodeToString()
+                // position(), not skip(): skip is free to move fewer bytes than asked, and a short
+                // one here would misalign this offset and every offset derived from it afterwards.
+                stream.channel.position(start)
+                stream.readBytes()
             }
         }.getOrNull() ?: return CaptureRead(offset = start)
 
-        // Only whole lines: a line still being appended is picked up on the next read.
-        val complete = text.substringBeforeLast('\n', missingDelimiterValue = "")
-        if (complete.isEmpty()) {
+        // Only whole lines: a line still being appended is picked up on the next read. The cut is
+        // found in BYTES because that is what the offset counts — measuring the decoded string would
+        // drift by one per multi-byte character the moment the log stopped being pure ASCII.
+        val lastNewline = bytes.lastIndexOf('\n'.code.toByte())
+        if (lastNewline < 0) {
             return CaptureRead(offset = start)
         }
 
-        val results = complete.lineSequence()
+        val results = bytes.decodeToString(0, lastNewline)
+            .lineSequence()
             .mapNotNull { parseCaptureLine(it) }
             .toList()
-        return CaptureRead(results = results, offset = start + complete.length + 1)
+        // Advanced even when nothing parsed, so a line this build doesn't understand is stepped over
+        // rather than re-read forever.
+        return CaptureRead(results = results, offset = start + lastNewline + 1)
     }
 
     override fun appliedConfigGeneration(): Long? {

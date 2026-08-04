@@ -39,15 +39,6 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
             .apply()
     }
 
-    override fun saveRestarted(source: String, target: String, sourceGuid: String?, targetGuid: String?) {
-        prefs.edit()
-            .putString(KEY_SOURCE, source)
-            .putString(KEY_TARGET, target)
-            .putString(KEY_SOURCE_GUID, sourceGuid)
-            .putString(KEY_TARGET_GUID, targetGuid)
-            .apply()
-    }
-
     override fun setExpectedRunning(expectedRunning: Boolean) {
         prefs.edit().putBoolean(KEY_EXPECTED_RUNNING, expectedRunning).apply()
     }
@@ -61,15 +52,29 @@ class AndroidMirrorSettingsRepository(context: Context) : MirrorSettingsReposito
     // Options the running daemon can adopt without being restarted. The generation advances in the
     // same commit as the value: it is the number the daemon acknowledges once it has adopted the
     // change, so a value stored without advancing it would be a change nobody ever asks it to make.
-    override fun bumpConfigGeneration() {
+    override fun bumpConfigGeneration() = synchronized(generationLock) {
         prefs.edit().putLong(KEY_CONFIG_GENERATION, prefs.getLong(KEY_CONFIG_GENERATION, 0L) + 1).apply()
     }
 
-    private fun setLiveOption(key: String, enabled: Boolean) {
+    private fun setLiveOption(key: String, enabled: Boolean) = synchronized(generationLock) {
         prefs.edit()
             .putBoolean(key, enabled)
             .putLong(KEY_CONFIG_GENERATION, prefs.getLong(KEY_CONFIG_GENERATION, 0L) + 1)
             .apply()
+    }
+
+    private companion object {
+        /*
+         * The generation is read-modify-written, and every writer runs on its own IO coroutine: two
+         * toggles flipped in quick succession both read N and both write N+1, so the supervisor sees
+         * the number it already pushed and the second change never reaches the daemon. It reads as a
+         * setting that silently did nothing.
+         *
+         * Held on the companion rather than the instance because the settings are one file and
+         * nothing guarantees one repository object per process — two instances synchronizing on
+         * themselves would take two different locks and protect nothing.
+         */
+        val generationLock = Any()
     }
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {

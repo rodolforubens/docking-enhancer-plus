@@ -575,15 +575,6 @@ private class FakeMirrorSettingsRepository(
         )
     }
 
-    override fun saveRestarted(source: String, target: String, sourceGuid: String?, targetGuid: String?) {
-        state = state.copy(
-            source = source,
-            target = target,
-            sourceGuid = sourceGuid,
-            targetGuid = targetGuid,
-        )
-    }
-
     override fun setExpectedRunning(expectedRunning: Boolean) {
         state = state.copy(expectedRunning = expectedRunning)
     }

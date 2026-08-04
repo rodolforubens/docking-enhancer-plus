@@ -17,7 +17,7 @@ import com.odininputmirror.domain.usecase.SetVirtualMouseEnabledUseCase
 import com.odininputmirror.domain.usecase.StartMirrorUseCase
 import com.odininputmirror.domain.usecase.StopMirrorUseCase
 
-class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
+class InputMirrorGraph private constructor(context: Context, forceDockMode: Boolean) {
     private val appContext = context.applicationContext
 
     // The mirror runs entirely through the stock firmware's PServerBinder service (no root). On a
@@ -71,10 +71,36 @@ class InputMirrorGraph(context: Context, forceDockMode: Boolean = false) {
     val setAutoMirrorEnabled = SetAutoMirrorEnabledUseCase(settingsRepository)
     val setManualInternalController = SetManualInternalControllerUseCase(settingsRepository)
     val resolveAutoMirrorDecision = ResolveAutoMirrorDecisionUseCase()
+
+    companion object {
+        @Volatile
+        private var shared: InputMirrorGraph? = null
+
+        /**
+         * The one graph for this process.
+         *
+         * The supervisor service and the screen both need it, and building two was not free: each
+         * carried its own [PServerExec] — hence its own cached binder and its own "does this device
+         * answer" verdict, which costs a blocking transact to establish — and its own
+         * [DefaultMappingSeeder], whose cache of pads the database does not know could then disagree
+         * with the other's. One graph pays each of those once.
+         *
+         * [forceDockMode] is honoured from whoever builds it first. That is not a race in practice:
+         * both callers pass the same build flag, and the screen already depends on agreeing with the
+         * supervisor about whether a dock is present.
+         */
+        fun of(context: Context, forceDockMode: Boolean): InputMirrorGraph =
+            shared ?: synchronized(this) {
+                shared ?: InputMirrorGraph(context, forceDockMode).also { shared = it }
+            }
+    }
 }
 
 /**
- * True when this device ships the PServerBinder service the mirror needs (no root). Lets the app
- * module gate startup without constructing the full graph.
+ * True when this device ships the PServerBinder service the mirror needs (no root).
+ *
+ * Answering costs a real transact the first time, so it goes through the shared [PServerExec] and is
+ * cached from then on. It also BLOCKS, which is why nothing on the main thread should ask: the
+ * supervisor establishes this on its worker and the screen on an IO dispatcher.
  */
-fun isPServerSupported(): Boolean = PServerExec().isAvailable
+fun isPServerSupported(): Boolean = PServerExec.shared.isAvailable

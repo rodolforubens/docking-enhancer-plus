@@ -27,9 +27,16 @@ class InputMirrorSupervisorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        graph = InputMirrorGraph(this, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
+        graph = InputMirrorGraph.of(this, forceDockMode = BuildConfig.FORCE_DOCK_MODE_FOR_DEV)
         notificationManager = getSystemService(NotificationManager::class.java)
-        startForeground(NOTIFICATION_ID, buildNotification(supervisorState))
+        ensureNotificationChannel()
+        // Guarded because this is a hard crash otherwise: a foreground start the framework refuses
+        // (ForegroundServiceStartNotAllowedException) throws right here, and the runCatching around
+        // startForegroundService in MainApplication is on the caller's side of the binder — it never
+        // sees this. Taking the process down over a notification we could not post is the worse
+        // outcome of the two, since everything the supervisor does still works without it.
+        runCatching { startForeground(NOTIFICATION_ID, buildNotification(supervisorState)) }
+            .onFailure { Log.w(TAG, "Could not enter the foreground", it) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -50,10 +57,27 @@ class InputMirrorSupervisorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun superviseMirror() {
-        // Without the PServerBinder service there is nothing to drive; surface it and stop the
-        // worker (the foreground notification stays as Unsupported).
+        try {
+            superviseUntilStopped()
+        } finally {
+            // However the worker leaves — the unsupported return below, an interrupt, an unexpected
+            // throw — the flag must stop claiming there is a supervisor behind it. Left true, the
+            // service would sit in the foreground forever with onStartCommand refusing to start a
+            // replacement because it believed one was already running.
+            running = false
+        }
+    }
+
+    private fun superviseUntilStopped() {
+        // Without the PServerBinder service there is nothing to drive. Established HERE, on the
+        // worker, because the probe blocks on a binder transact — the startup paths used to ask on
+        // the main thread before starting us at all.
         if (!graph.isSupportedDevice) {
-            updateSupervisorState(SupervisorState.Unsupported)
+            // Stand down completely rather than idling. A stopped worker behind a live foreground
+            // service would pin an ongoing notification the user cannot swipe away, saying only that
+            // their device will never work. The screen surfaces that verdict on its own.
+            Log.i(TAG, "PServerBinder is unavailable; the supervisor has nothing to drive")
+            stopSelf()
             return
         }
 
@@ -248,23 +272,30 @@ class InputMirrorSupervisorService : Service() {
     }
 
     private fun updateSupervisorState(state: SupervisorState) {
-        if (supervisorState == state) {
+        // An interrupt does not abort a binder transact already in flight, so a tick that was mid-call
+        // when onDestroy ran finishes and arrives here afterwards. Posting then re-creates an ongoing
+        // notification for a service the framework has already torn down — and ongoing means the user
+        // cannot swipe it away.
+        if (!running || supervisorState == state) {
             return
         }
         supervisorState = state
         notificationManager.notify(NOTIFICATION_ID, buildNotification(state))
     }
 
-    private fun buildNotification(state: SupervisorState): Notification {
+    private fun ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Mirror supervisor",
-                NotificationManager.IMPORTANCE_LOW,
+            notificationManager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "Mirror supervisor",
+                    NotificationManager.IMPORTANCE_LOW,
+                ),
             )
-            notificationManager.createNotificationChannel(channel)
         }
+    }
 
+    private fun buildNotification(state: SupervisorState): Notification {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
         } else {
@@ -300,7 +331,6 @@ class InputMirrorSupervisorService : Service() {
         Active("Dock mirror active"),
         Restarting("Restarting dock mirror"),
         MirrorStartFailed("Could not start the mirror"),
-        Unsupported("This device is not supported"),
         Error("Mirror supervisor error"),
     }
 

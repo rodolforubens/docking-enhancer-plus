@@ -4,16 +4,16 @@ import android.app.Application
 import android.content.Intent
 import android.os.Build
 import android.util.Log
-import com.odininputmirror.data.isPServerSupported
 
 class MainApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // The mirror drives the stock firmware's PServerBinder service (no root). On devices that
-        // don't ship it there is nothing to supervise, so don't start the service at all.
-        if (isPServerSupported()) {
-            startSupervisor()
-        }
+        // Started unconditionally, and the service decides. Asking here whether the device ships
+        // PServerBinder meant a BLOCKING binder transact on the main thread at process start — and on
+        // hardware that publishes the service without answering it (the Odin 2 Mini) that is a
+        // synchronous call to something dead, on the thread that draws. The supervisor makes the same
+        // check on its worker and stands itself down if there is nothing to drive.
+        startSupervisor()
     }
 
     private fun startSupervisor() {

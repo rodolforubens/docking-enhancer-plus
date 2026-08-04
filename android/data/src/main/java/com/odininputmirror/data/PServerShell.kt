@@ -25,7 +25,7 @@ internal class PServerShell(
     private val filesDir: File,
     private val pserver: PServerTransactor,
 ) : MirrorShell {
-    constructor(context: Context, pserver: PServerTransactor = PServerExec()) : this(
+    constructor(context: Context, pserver: PServerTransactor = PServerExec.shared) : this(
         filesDir = context.applicationContext.filesDir,
         pserver = pserver,
     )
