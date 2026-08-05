@@ -14,6 +14,10 @@
 
 <img src="docking-enhancer-ui.png" alt="Docking Enhancer" width="820">
 
+<br><br>
+
+<img src="docking-enhancer-ui-2.png" alt="Controller mapping editor, showing a pad mapped from its bundled profile" width="820">
+
 </div>
 
 ## What it does
@@ -29,11 +33,14 @@ It runs without root, using a privileged service the stock firmware already ship
 
 - **Automatic** — starts on its own while docked, and survives reboots
 - **Hides the external pad** while mirroring, so games see one controller instead of a phantom player 2
+- **Per-controller button mapping** — press a control to bind it; triggers and stick halves can fill
+  button slots, and untouched controls keep working. Pads the bundled
+  [SDL database](third-party/gamecontrollerdb/NOTICE.md) knows arrive already mapped
 - **Virtual mouse** — Select + R3 turns the pad into a pointer for tapping through Android UI
 - **Home as Back**, and **Select + Start** (3s) to close the current app
 - **Nintendo layout aware** — swaps A/B and X/Y when targeting the Odin's Nintendo profile
 - **Gamepad-navigable UI** — set it up without touching the screen
-- **~0.09 ms of added latency** — half a percent of one 60Hz frame ([measured](docs/TECHNICAL.md#latency))
+- **~0.04 ms of added latency** — a fraction of one 60Hz frame ([measured](docs/TECHNICAL.md#latency))
 
 ## Install
 
