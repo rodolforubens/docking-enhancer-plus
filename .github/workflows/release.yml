@@ -1,0 +1,102 @@
+name: Publish Android release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check release version and native asset
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, re
+          build = pathlib.Path('android/app/build.gradle').read_text()
+          version = re.search(r'versionName "([^"]+)"', build).group(1)
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', os.environ['RELEASE_TAG']), 'Expected vMAJOR.MINOR.PATCH'
+          assert os.environ['RELEASE_TAG'] == 'v' + version, 'Tag and versionName must match'
+          binary = pathlib.Path('android/app/src/main/assets/input_mirror/input_mirror')
+          assert hashlib.sha256(binary.read_bytes()).hexdigest() == pathlib.Path(str(binary) + '.sha256').read_text().strip(), 'Native asset checksum mismatch'
+          PY
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK packages
+        run: sdkmanager 'platforms;android-35' 'build-tools;34.0.0'
+
+      - name: Run unit tests
+        working-directory: android
+        run: sh gradlew :domain:test :data:testReleaseUnitTest :app:testReleaseUnitTest --no-daemon
+
+      - name: Configure release signing
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib
+          names = ('RELEASE_KEYSTORE_BASE64', 'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD')
+          for name in names:
+              if not os.environ.get(name):
+                  raise SystemExit('Missing repository secret: ' + name)
+          os.umask(0o077)
+          key = pathlib.Path(os.environ['RUNNER_TEMP']) / 'release.jks'
+          key.write_bytes(base64.b64decode(os.environ['RELEASE_KEYSTORE_BASE64'], validate=True))
+          def escape(value):
+              return ''.join('\\u%04x' % ord(c) for c in value)
+          values = {'storeFile': str(key), 'storePassword': os.environ['RELEASE_STORE_PASSWORD'], 'keyAlias': os.environ['RELEASE_KEY_ALIAS'], 'keyPassword': os.environ['RELEASE_KEY_PASSWORD']}
+          pathlib.Path('android/keystore.properties').write_text(''.join(k + '=' + escape(v) + '\n' for k, v in values.items()))
+          PY
+
+      - name: Build signed APK
+        working-directory: android
+        run: sh gradlew :app:assembleRelease --no-daemon
+
+      - name: Verify APK and prepare download
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose android/app/build/outputs/apk/release/app-release.apk
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/docking-enhancer-${RELEASE_TAG}.apk"
+          cd dist
+          sha256sum *.apk > SHA256SUMS.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --title "Docking Enhancer ${RELEASE_TAG}" --generate-notes
+          fi
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f android/keystore.properties "$RUNNER_TEMP/release.jks"
