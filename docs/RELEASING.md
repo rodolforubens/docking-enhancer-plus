@@ -23,7 +23,7 @@ and passes the values to GitHub through standard input without displaying them.
 
 Keep an independent secure backup of the keystore and credentials. Never commit them.
 Future updates must use the same signing key. Signing files on the runner are removed
-even when a build fails. The workflow is triggered by tags, not pull requests.
+even when a build fails. The workflow is triggered by tags or a manual dispatch, not pull requests.
 
 ## Publish
 
@@ -37,6 +37,22 @@ even when a build fails. The workflow is triggered by tags, not pull requests.
    ```
 
 4. Check the **Publish Android release** Actions run and download the APK from Releases.
+
+## Retry with an updated workflow
+
+Commit and push workflow fixes to `main`. In **Actions → Publish Android release → Run
+workflow**, choose `main` and enter the existing release tag, for example `v0.2.0`.
+Alternatively, run:
+
+```sh
+gh workflow run release.yml --repo rodolforubens/docking-enhancer-plus --ref main -f tag=v0.2.0
+```
+
+The workflow definition comes from `main`, while the app source is checked out from
+the specified tag. This allows fixing the release automation without moving the tag
+or changing the app version. The tag must already exist and match `versionName`.
+The manual trigger becomes available once this workflow is on the default branch.
+The **Re-run jobs** button on an old run continues to use that run's original workflow.
 
 An existing release is reused on a rerun, preserving its edited notes. If the release
 has immutable assets enabled, a published asset cannot be replaced; publish a new version.
