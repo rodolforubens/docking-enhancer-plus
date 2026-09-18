@@ -22,4 +22,7 @@ data class ControllerDevice(
     // vendor:product, so they all share a guid. Null when no distinct real device was found — an
     // internal controller, or a pad the firmware did not republish.
     val mappingKey: MappingKey? = null,
+    // Previous releases called vendor:product a GUID. Keep that derived value only as a migration
+    // alias so saved selections survive the move to Android's real persistent device descriptor.
+    val legacyGuid: String? = null,
 )

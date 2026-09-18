@@ -51,16 +51,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Asked for once, never insisted on. A denial costs the status notification and nothing else —
-    // the supervisor and the mirror run either way — so there is no prompt to re-raise and no
-    // reason to block the UI on the answer.
-    private val requestNotificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    // Asked for once, never insisted on. Denying notifications only hides supervisor status;
+    // denying Bluetooth access only means controller cards fall back to the kernel device name.
+    private val requestRuntimePermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
+        requestRuntimePermissionsIfNeeded()
         setContent {
             DockingEnhancerTheme {
                 val vm: MirrorViewModel = viewModel(factory = MirrorViewModel.factory(applicationContext))
@@ -69,14 +68,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return
+    private fun requestRuntimePermissionsIfNeeded() {
+        val missing = buildList {
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
         }
-        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (missing.isNotEmpty()) {
+            requestRuntimePermissions.launch(missing.toTypedArray())
         }
     }
 

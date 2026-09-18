@@ -10,10 +10,10 @@ import com.odininputmirror.domain.usecase.GetConnectedDevicesUseCase
 import com.odininputmirror.domain.usecase.GetMirrorStatusUseCase
 import com.odininputmirror.domain.usecase.ResolveAutoMirrorDecisionUseCase
 import com.odininputmirror.domain.usecase.SetAutoMirrorEnabledUseCase
-import com.odininputmirror.domain.usecase.SetComboHoldKillAppEnabledUseCase
-import com.odininputmirror.domain.usecase.SetHomeAsBackEnabledUseCase
+import com.odininputmirror.domain.usecase.SetAutoMirrorTriggerUseCase
+import com.odininputmirror.domain.usecase.SetGestureActionUseCase
 import com.odininputmirror.domain.usecase.SetManualInternalControllerUseCase
-import com.odininputmirror.domain.usecase.SetVirtualMouseEnabledUseCase
+import com.odininputmirror.domain.usecase.SetManualExternalControllerUseCase
 import com.odininputmirror.domain.usecase.StartMirrorUseCase
 import com.odininputmirror.domain.usecase.StopMirrorUseCase
 
@@ -39,10 +39,13 @@ class InputMirrorGraph private constructor(context: Context, forceDockMode: Bool
         shell = shell,
     )
     val mappingRepository: MappingRepository = AndroidMappingRepository(appContext)
+    private val bluetoothAliases = AndroidBluetoothAliases(appContext)
     val inputDeviceRepository: InputDeviceRepository = AndroidInputDeviceRepository(
         shell = shell,
+        bluetoothAliasesProvider = bluetoothAliases::byAddress,
         manualInternalGuidProvider = { settingsRepository.getSettings().manualInternalGuid },
         hiddenSourcePathProvider = { settingsRepository.getSettings().source },
+        hiddenSourceGuidProvider = { settingsRepository.getSettings().sourceGuid },
         mirrorRunningProvider = { processRepository.isRunning() },
     )
 
@@ -65,12 +68,27 @@ class InputMirrorGraph private constructor(context: Context, forceDockMode: Bool
     val startMirror = StartMirrorUseCase(processRepository, settingsRepository)
     val stopMirror = StopMirrorUseCase(processRepository, settingsRepository)
     val getMirrorStatus = GetMirrorStatusUseCase(processRepository, settingsRepository, dockStateRepository)
-    val setHomeAsBackEnabled = SetHomeAsBackEnabledUseCase(settingsRepository)
-    val setComboHoldKillAppEnabled = SetComboHoldKillAppEnabledUseCase(settingsRepository)
-    val setVirtualMouseEnabled = SetVirtualMouseEnabledUseCase(settingsRepository)
+    val setGestureAction = SetGestureActionUseCase(settingsRepository)
     val setAutoMirrorEnabled = SetAutoMirrorEnabledUseCase(settingsRepository)
+    val setAutoMirrorTrigger = SetAutoMirrorTriggerUseCase(settingsRepository)
     val setManualInternalController = SetManualInternalControllerUseCase(settingsRepository)
+    val setManualExternalController = SetManualExternalControllerUseCase(settingsRepository)
     val resolveAutoMirrorDecision = ResolveAutoMirrorDecisionUseCase()
+
+    /**
+     * Add one service to Android's enabled-accessibility list without clobbering other services.
+     * PServer executes this off the UI thread with the same privilege used by the mirror daemon.
+     */
+    fun ensureAccessibilityServiceEnabled(componentName: String): Boolean {
+        val current = shell.read("settings get secure enabled_accessibility_services")
+        val next = mergedAccessibilityServices(current, componentName) ?: return false
+        val updateList = if (next == current.trim()) {
+            ""
+        } else {
+            "settings put secure enabled_accessibility_services ${next.shellQuote()}; "
+        }
+        return shell.exec("${updateList}settings put secure accessibility_enabled 1")
+    }
 
     companion object {
         @Volatile
@@ -94,6 +112,20 @@ class InputMirrorGraph private constructor(context: Context, forceDockMode: Bool
                 shared ?: InputMirrorGraph(context, forceDockMode).also { shared = it }
             }
     }
+}
+
+internal fun mergedAccessibilityServices(currentSetting: String, componentName: String): String? {
+    val current = currentSetting.trim()
+    if (current.isEmpty()) return null
+    require(componentName.matches(Regex("[A-Za-z0-9._/]+"))) {
+        "Invalid accessibility component"
+    }
+    val services = if (current == "null") {
+        emptyList()
+    } else {
+        current.split(':').filter(String::isNotBlank)
+    }
+    return (services + componentName).distinct().joinToString(":")
 }
 
 /**

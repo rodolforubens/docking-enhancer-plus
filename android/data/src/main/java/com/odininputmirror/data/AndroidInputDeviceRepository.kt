@@ -4,16 +4,21 @@ import android.view.InputDevice
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.TargetTraits
+import com.odininputmirror.domain.model.findControllerByGuid
 import com.odininputmirror.domain.repository.InputDeviceRepository
 import java.io.File
 
 internal class AndroidInputDeviceRepository(
     private val shell: MirrorShell = UnavailableShell,
     private val pathExists: (String) -> Boolean = { File(it).exists() },
+    private val bluetoothAliasesProvider: () -> Map<String, String> = { emptyMap() },
     private val manualInternalGuidProvider: () -> String? = { null },
     // Path of the mirror source we may have hidden (its /dev node unlinked). Lets us re-materialise
     // it from /proc so the UI and auto-mirror logic still see the controller being mirrored.
     private val hiddenSourcePathProvider: () -> String? = { null },
+    // The real Android descriptor saved when that source was visible. A hidden source cannot recover
+    // it from /proc, but keeping it here prevents its identity changing while the mirror is running.
+    private val hiddenSourceGuidProvider: () -> String? = { null },
     // True only while the mirror is actually running. Gates re-materialisation so a STALE persisted
     // source (from a prior session, e.g. a real node that never has a /dev entry) is never revived
     // when nothing is running — which would otherwise block restarting on the live node.
@@ -62,19 +67,24 @@ internal class AndroidInputDeviceRepository(
 
     override fun getConnectedControllers(): List<ControllerDevice> {
         val procEntries = readProcEntries()
+        val bluetoothAliases = bluetoothAliasesProvider()
 
         val mirroredNames = computeMirroredNames(procEntries)
 
-        val framework = InputDevice.getDeviceIds()
+        val frameworkCandidates = InputDevice.getDeviceIds()
             .asSequence()
             .mapNotNull { id -> InputDevice.getDevice(id) }
             .filter { device -> isPhysicalGameController(device) }
             .map { it.toCandidate() }
-            .mapNotNull { candidate -> resolveControllerDevice(candidate, procEntries, mirroredNames) }
-            .distinctBy { it.path }
             .toList()
+        val framework = resolveControllerDevices(
+            frameworkCandidates,
+            procEntries,
+            mirroredNames,
+            bluetoothAliases,
+        )
 
-        val devices = (framework + hiddenSourceDevice(framework, procEntries))
+        val devices = (framework + hiddenSourceDevice(framework, procEntries, bluetoothAliases))
             .sortedBy { it.controllerNumber }
 
         return resolveInternalController(devices, manualInternalGuidProvider())
@@ -88,6 +98,7 @@ internal class AndroidInputDeviceRepository(
     internal fun hiddenSourceDevice(
         resolved: List<ControllerDevice>,
         procEntries: List<ProcInputEntry>,
+        bluetoothAliases: Map<String, String> = emptyMap(),
     ): List<ControllerDevice> {
         if (!mirrorRunningProvider()) {
             return emptyList()
@@ -99,9 +110,10 @@ internal class AndroidInputDeviceRepository(
         val entry = procEntries.firstOrNull { it.path == hiddenSource } ?: return emptyList()
         return listOf(
             ControllerDevice(
-                name = entry.name,
+                name = resolveBluetoothDisplayName(entry, procEntries, bluetoothAliases),
                 path = entry.path,
-                guid = guidOf(entry.vendorId, entry.productId),
+                guid = hiddenSourceGuidProvider()?.takeIf { it.isNotBlank() }
+                    ?: guidOf(entry.vendorId, entry.productId),
                 controllerNumber = 0,
                 handlers = entry.handlers,
                 isInternal = false,
@@ -109,6 +121,7 @@ internal class AndroidInputDeviceRepository(
                 hideNodePath = entry.path,
                 // The mirror is running, so this is the path the wizard sees the pad through.
                 mappingKey = resolveMappingKey(entry.name, procEntries),
+                legacyGuid = guidOf(entry.vendorId, entry.productId),
             ),
         )
     }
@@ -126,7 +139,7 @@ internal class AndroidInputDeviceRepository(
             return devices
         }
 
-        val manualMatch = manualGuid?.let { guid -> devices.firstOrNull { it.guid == guid } }
+        val manualMatch = devices.findControllerByGuid(manualGuid)
         if (manualMatch != null) {
             return devices.map { device -> device.copy(isInternal = device.path == manualMatch.path) }
         }
@@ -181,18 +194,21 @@ internal class AndroidInputDeviceRepository(
         candidate: ControllerCandidate,
         entries: List<ProcInputEntry>,
         mirroredNames: Set<String>,
+        excludedPaths: Set<String> = emptySet(),
+        bluetoothAliases: Map<String, String> = emptyMap(),
     ): ControllerDevice? {
         val normalizedName = candidate.name.lowercase()
         val candidates = entries.filter { entry ->
             if (!pathExists(entry.path)) {
                 return@filter false
             }
+            if (entry.path in excludedPaths) {
+                return@filter false
+            }
 
             val sameVendorProduct =
                 candidate.vendorId != 0 &&
                     candidate.productId != 0 &&
-                    candidate.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
-                    entry.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
                     entry.vendorId == candidate.vendorId &&
                     entry.productId == candidate.productId
             val sameName = entry.name.lowercase() == normalizedName
@@ -202,10 +218,13 @@ internal class AndroidInputDeviceRepository(
         return candidates
             .sortedWith(
                 compareByDescending<ProcInputEntry> {
-                    candidate.vendorId !in MIRRORING_QUIRK_VENDOR_IDS &&
-                        it.vendorId == candidate.vendorId &&
+                    it.vendorId == candidate.vendorId &&
                         it.productId == candidate.productId
                 }
+                    // Thor gives its internal pad, republished external pad, and virtual mouse
+                    // overlapping 2020 vendor/product pairs. Among exact-id matches, the framework
+                    // name is what prevents the mouse's lower event number from stealing the pad.
+                    .thenByDescending { it.name.lowercase() == normalizedName }
                     .thenByDescending { it.bus == BUS_BLUETOOTH }
                     .thenByDescending { it.bus == BUS_USB && it.vendorId !in MIRRORING_QUIRK_VENDOR_IDS }
                     .thenBy { it.isInternalControllerSignature }
@@ -213,21 +232,79 @@ internal class AndroidInputDeviceRepository(
             )
             .firstOrNull()
             ?.let { entry ->
-                val isInternal = entry.isInternalControllerSignature && entry.name.lowercase() !in mirroredNames
+                val isInternal = isKnownInternalEntry(entry, mirroredNames)
                 ControllerDevice(
-                    name = entry.name,
+                    name = if (isInternal) {
+                        entry.name
+                    } else {
+                        resolveBluetoothDisplayName(entry, entries, bluetoothAliases)
+                    },
                     path = entry.path,
                     guid = candidate.guid,
                     controllerNumber = candidate.controllerNumber,
                     handlers = entry.handlers,
                     isInternal = isInternal,
                     isKnownInternal = isInternal,
-                    hideNodePath = resolveHideNodePath(isInternal, normalizedName, entries),
+                    hideNodePath = resolveHideNodePath(isInternal, entry, entries, mirroredNames),
                     // Only an external controller gets one: the internal pad IS the quirk vendor, so
                     // it has no separate real entry to point at, and it is never the one remapped.
                     mappingKey = if (isInternal) null else resolveMappingKey(entry.name, entries),
+                    legacyGuid = candidate.legacyGuid,
                 )
             }
+    }
+
+    /**
+     * Match the framework list as a group so two same-name pads cannot both claim the same event
+     * node. Exact vendor/product matches are preferred first; each selected path is then reserved
+     * before the next candidate is resolved.
+     */
+    internal fun resolveControllerDevices(
+        candidates: List<ControllerCandidate>,
+        entries: List<ProcInputEntry>,
+        mirroredNames: Set<String>,
+        bluetoothAliases: Map<String, String> = emptyMap(),
+    ): List<ControllerDevice> {
+        val claimedPaths = mutableSetOf<String>()
+        return candidates.mapNotNull { candidate ->
+            resolveControllerDevice(candidate, entries, mirroredNames, claimedPaths, bluetoothAliases)
+                ?.also { claimedPaths += it.path }
+        }
+    }
+
+    internal fun resolveBluetoothDisplayName(
+        selectedEntry: ProcInputEntry,
+        entries: List<ProcInputEntry>,
+        aliases: Map<String, String>,
+    ): String {
+        val bluetoothEntry = if (selectedEntry.bus == BUS_BLUETOOTH) {
+            selectedEntry
+        } else {
+            entries.asSequence()
+                .filter { entry ->
+                    entry.bus == BUS_BLUETOOTH &&
+                        entry.name.equals(selectedEntry.name, ignoreCase = true) &&
+                        !entry.uniqueId.isNullOrBlank()
+                }
+                .minByOrNull { entry ->
+                    val selectedInput = selectedEntry.sysfsInputNumber ?: return@minByOrNull Int.MAX_VALUE
+                    val bluetoothInput = entry.sysfsInputNumber ?: return@minByOrNull Int.MAX_VALUE
+                    (selectedInput - bluetoothInput).takeIf { it >= 0 } ?: Int.MAX_VALUE
+                }
+        }
+        val address = bluetoothEntry?.uniqueId?.let(::normalizeBluetoothAddress)
+        return address?.let(aliases::get)?.takeIf { it.isNotBlank() } ?: selectedEntry.name
+    }
+
+    /**
+     * The external pad's real proc entry normally disqualifies a same-name 0x2020 node as internal.
+     * Xbox mode is the exception: the built-in pad itself is 2020:0112 and can share the exact name
+     * "Xbox Wireless Controller" with an external whose firmware twin is 2020:0111.
+     */
+    private fun isKnownInternalEntry(entry: ProcInputEntry, mirroredNames: Set<String>): Boolean {
+        if (!entry.isInternalControllerSignature) return false
+        if (entry.vendorId == ODIN_VENDOR_ID && entry.productId == ODIN_XBOX_PRODUCT_ID) return true
+        return entry.name.lowercase() !in mirroredNames
     }
 
     // The framework surfaces an external controller as the Odin quirk (vendor 0x2020) node bearing
@@ -237,15 +314,21 @@ internal class AndroidInputDeviceRepository(
     // (never hide the mirror target) and when no such node exists.
     private fun resolveHideNodePath(
         isInternal: Boolean,
-        normalizedName: String,
+        selectedEntry: ProcInputEntry,
         entries: List<ProcInputEntry>,
+        mirroredNames: Set<String>,
     ): String? {
         if (isInternal) {
             return null
         }
+        if (selectedEntry.vendorId in MIRRORING_QUIRK_VENDOR_IDS) {
+            return selectedEntry.path
+        }
+        val normalizedName = selectedEntry.name.lowercase()
         return entries.firstOrNull { entry ->
             entry.vendorId in MIRRORING_QUIRK_VENDOR_IDS &&
                 entry.name.lowercase() == normalizedName &&
+                !isKnownInternalEntry(entry, mirroredNames) &&
                 pathExists(entry.path)
         }?.path
     }
@@ -257,6 +340,14 @@ internal class AndroidInputDeviceRepository(
         val name = Regex("N: Name=\"([^\"]+)\"").find(block)?.groupValues?.getOrNull(1) ?: return null
         val handlersLine = Regex("H: Handlers=(.+)").find(block)?.groupValues?.getOrNull(1) ?: return null
         val eventName = Regex("\\bevent\\d+\\b").find(handlersLine)?.value ?: return null
+        val uniqueId = Regex("(?m)^U: Uniq=(.*)$").find(block)?.groupValues?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        val sysfsInputNumber = Regex("(?m)^S: Sysfs=.*?/input/input(\\d+)\\s*$")
+            .find(block)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
 
         return ProcInputEntry(
             name = name,
@@ -266,6 +357,8 @@ internal class AndroidInputDeviceRepository(
             bus = identityMatch.groupValues[1].toInt(16),
             vendorId = identityMatch.groupValues[2].toInt(16),
             productId = identityMatch.groupValues[3].toInt(16),
+            uniqueId = uniqueId,
+            sysfsInputNumber = sysfsInputNumber,
             keyBits = capabilityBits(block, "KEY"),
             absBits = capabilityBits(block, "ABS"),
         )
@@ -301,6 +394,8 @@ internal class AndroidInputDeviceRepository(
         val bus: Int,
         val vendorId: Int,
         val productId: Int,
+        val uniqueId: String? = null,
+        val sysfsInputNumber: Int? = null,
         val keyBits: Set<Int> = emptySet(),
         val absBits: Set<Int> = emptySet(),
     ) {
@@ -318,6 +413,7 @@ internal data class ControllerCandidate(
     val productId: Int,
     val controllerNumber: Int,
     val guid: String,
+    val legacyGuid: String? = null,
 )
 
 private fun InputDevice.toCandidate(): ControllerCandidate = ControllerCandidate(
@@ -325,13 +421,14 @@ private fun InputDevice.toCandidate(): ControllerCandidate = ControllerCandidate
     vendorId = vendorId,
     productId = productId,
     controllerNumber = controllerNumber,
-    guid = getGuid(),
+    guid = descriptor.takeIf { it.isNotBlank() } ?: getLegacyGuid(),
+    legacyGuid = getLegacyGuid(),
 )
 
-private fun InputDevice.getGuid(): String = guidOf(vendorId, productId)
+private fun InputDevice.getLegacyGuid(): String = guidOf(vendorId, productId)
 
-// Controller GUID from vendor + product only — matches InputDevice.getGuid() so a device
-// re-materialised from /proc keeps the same identity the framework had assigned it.
+// Legacy identity used before Android's persistent InputDevice descriptor was adopted. It remains
+// available for preference migration and as a last-resort fallback when a descriptor is blank.
 internal fun guidOf(vendorId: Int, productId: Int): String = String.format("%016x%016x", productId, vendorId)
 
 private fun Int.hasSource(source: Int): Boolean = this and source == source

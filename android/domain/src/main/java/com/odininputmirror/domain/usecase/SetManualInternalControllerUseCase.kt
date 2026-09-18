@@ -9,3 +9,11 @@ class SetManualInternalControllerUseCase(
         mirrorSettingsRepository.setManualInternalController(guid)
     }
 }
+
+class SetManualExternalControllerUseCase(
+    private val mirrorSettingsRepository: MirrorSettingsRepository,
+) {
+    operator fun invoke(guid: String?) {
+        mirrorSettingsRepository.setManualExternalController(guid)
+    }
+}

@@ -6,6 +6,7 @@ import com.odininputmirror.domain.model.CaptureKind
 import com.odininputmirror.domain.model.CaptureRead
 import com.odininputmirror.domain.model.CaptureResult
 import com.odininputmirror.domain.model.ControllerMapping
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.repository.MirrorProcessRepository
@@ -33,9 +34,11 @@ internal class RootMirrorProcessRepository(
         files.writeConfig(
             configJson(
                 generation = mirrorSettingsRepository.getSettings().configGeneration,
-                homeAsBack = request.homeAsBack,
-                comboHoldKillApp = request.comboHoldKillApp,
-                virtualMouse = request.virtualMouse,
+                homeSinglePressAction = request.homeSinglePressAction,
+                homeDoublePressAction = request.homeDoublePressAction,
+                homeHoldAction = request.homeHoldAction,
+                selectStartHoldAction = request.selectStartHoldAction,
+                selectR3HoldAction = request.selectR3HoldAction,
                 mapping = request.mapping,
             ),
         )
@@ -44,19 +47,26 @@ internal class RootMirrorProcessRepository(
         val configArg = " --config-file ${files.configFile.absolutePath.shellQuote()}"
         val controlFifoArg = " --control-fifo ${files.controlFifo.absolutePath.shellQuote()}"
         val captureArg = " --capture-file ${files.captureFile.absolutePath.shellQuote()}"
-        val homeAsBackArg = if (request.homeAsBack) " --home-as-back" else ""
-        val comboHoldKillAppArg = if (request.comboHoldKillApp) " --combo-hold-kill-app" else ""
-        val virtualMouseArg = if (request.virtualMouse) " --virtual-mouse" else ""
+        val actionArgs = buildString {
+            append(" --home-single-action ${request.homeSinglePressAction.nativeCode}")
+            append(" --home-double-action ${request.homeDoublePressAction.nativeCode}")
+            append(" --home-hold-action ${request.homeHoldAction.nativeCode}")
+            append(" --select-start-hold-action ${request.selectStartHoldAction.nativeCode}")
+            append(" --select-r3-hold-action ${request.selectR3HoldAction.nativeCode}")
+        }
         val hideNodeArgs = request.hideNodes.joinToString("") { " --hide-node ${it.shellQuote()}" }
         val hiddenStateArg = " --hidden-state-file ${files.hiddenStateFile.absolutePath.shellQuote()}"
         val pidFileArg = " --pid-file ${files.pidFile.absolutePath.shellQuote()}"
         val heartbeatFileArg = " --heartbeat-file ${files.heartbeatFile.absolutePath.shellQuote()}"
+        val recentsArgs =
+            " --recents-state-file ${files.recentsStateFile.absolutePath.shellQuote()}" +
+                " --recents-events-file ${files.recentsEventsFile.absolutePath.shellQuote()}"
         // Foreground invocation only; launchDaemon backgrounds it appropriately per backend. The
         // binary writes (and chmods) its own pid/heartbeat files via --pid-file/--heartbeat-file,
         // so no `echo $! > pidfile` bookkeeping is needed here.
         //
         val launch =
-            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$homeAsBackArg$comboHoldKillAppArg$virtualMouseArg$hideNodeArgs$hiddenStateArg$configArg$controlFifoArg$captureArg$pidFileArg$heartbeatFileArg"
+            "nice -n -20 ${binary.absolutePath.shellQuote()} ${request.source.shellQuote()} ${request.target.shellQuote()}$actionArgs$hideNodeArgs$hiddenStateArg$configArg$controlFifoArg$captureArg$pidFileArg$heartbeatFileArg$recentsArgs"
 
         // Only skip the launch for a daemon already mirroring THESE nodes.
         //
@@ -151,9 +161,11 @@ internal class RootMirrorProcessRepository(
         files.writeConfig(
             configJson(
                 generation = settings.configGeneration,
-                homeAsBack = settings.homeAsBack,
-                comboHoldKillApp = settings.comboHoldKillApp,
-                virtualMouse = settings.virtualMouse,
+                homeSinglePressAction = settings.homeSinglePressAction,
+                homeDoublePressAction = settings.homeDoublePressAction,
+                homeHoldAction = settings.homeHoldAction,
+                selectStartHoldAction = settings.selectStartHoldAction,
+                selectR3HoldAction = settings.selectR3HoldAction,
                 mapping = mapping,
             ),
         )
@@ -276,21 +288,24 @@ private fun parseCaptureLine(line: String): CaptureResult? {
 // An empty binding table is written out rather than omitted: the daemon rebuilds its table from
 // whatever the document names, so leaving the key out clears the mapping instead of keeping it.
 //
-// Every value here is a boolean or a number the app itself produced, so there is nothing to escape
-// and no reason to pull in a JSON library for four fields. The daemon reads it with a scanner of
-// matching simplicity.
+// Every value here is a number the app itself produced, so there is nothing to escape and no reason
+// to pull in a JSON library for these small fields. The daemon reads it with a matching scanner.
 private fun configJson(
     generation: Long,
-    homeAsBack: Boolean,
-    comboHoldKillApp: Boolean,
-    virtualMouse: Boolean,
+    homeSinglePressAction: GestureAction,
+    homeDoublePressAction: GestureAction,
+    homeHoldAction: GestureAction,
+    selectStartHoldAction: GestureAction,
+    selectR3HoldAction: GestureAction,
     mapping: ControllerMapping,
 ): String = """
     {
       "generation": $generation,
-      "home_as_back": $homeAsBack,
-      "combo_hold_kill_app": $comboHoldKillApp,
-      "virtual_mouse": $virtualMouse,
+      "home_single_action": ${homeSinglePressAction.nativeCode},
+      "home_double_action": ${homeDoublePressAction.nativeCode},
+      "home_hold_action": ${homeHoldAction.nativeCode},
+      "select_start_hold_action": ${selectStartHoldAction.nativeCode},
+      "select_r3_hold_action": ${selectR3HoldAction.nativeCode},
       "mapping": {
         "bindings": [${mapping.configBindingRows()}]
       }

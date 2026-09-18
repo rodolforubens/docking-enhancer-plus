@@ -32,11 +32,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.odininputmirror.domain.model.AutoMirrorTrigger
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.ui.theme.Palette
 
-// The two modal surfaces of the mirror screen: the dead end for an unsupported device, and the
-// picker for telling the app which pad is the built-in one when it cannot tell.
+// Modal surfaces for unsupported hardware and manual internal/external controller selection.
 
 @Composable
 internal fun UnsupportedDeviceDialog(serviceUnresponsive: Boolean) {
@@ -77,6 +78,41 @@ internal fun InternalControllerPicker(
     onSelect: (String?) -> Unit,
     onClose: () -> Unit,
 ) {
+    ControllerPickerDialog(
+        title = "Select internal controller",
+        automaticLabel = "Automatic (detect)",
+        emptyMessage = "No controllers detected. Connect the built-in controller and try again.",
+        devices = devices,
+        selectedGuid = selectedGuid,
+        onSelect = onSelect,
+        onClose = onClose,
+    )
+}
+
+@Composable
+internal fun ExternalControllerPicker(
+    devices: List<ControllerDevice>,
+    selectedGuid: String?,
+    onSelect: (String?) -> Unit,
+    onClose: () -> Unit,
+) {
+    ControllerPickerDialog(
+        title = "Select external controller",
+        automaticLabel = "Automatic (first connected)",
+        emptyMessage = "No external controllers detected. Connect a controller and try again.",
+        devices = devices,
+        selectedGuid = selectedGuid,
+        onSelect = onSelect,
+        onClose = onClose,
+    )
+}
+
+@Composable
+internal fun AutoMirrorTriggerPicker(
+    selected: AutoMirrorTrigger,
+    onSelect: (AutoMirrorTrigger) -> Unit,
+    onClose: () -> Unit,
+) {
     Dialog(onDismissRequest = onClose) {
         Column(
             modifier = Modifier
@@ -86,25 +122,109 @@ internal fun InternalControllerPicker(
                 .border(1.dp, Palette.border, RoundedCornerShape(14.dp))
                 .padding(horizontal = 24.dp, vertical = 20.dp),
         ) {
-            Text("Select internal controller", color = Palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
+            Text(
+                "Automatic start condition",
+                color = Palette.textPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.ExtraBold,
+            )
+            Spacer(Modifier.height(14.dp))
+            PickerOption(
+                name = "External controller",
+                selected = selected == AutoMirrorTrigger.CONTROLLER_CONNECTED,
+            ) { onSelect(AutoMirrorTrigger.CONTROLLER_CONNECTED) }
+            PickerOption(
+                name = "Controller + external display",
+                selected = selected == AutoMirrorTrigger.CONTROLLER_AND_DISPLAY,
+            ) { onSelect(AutoMirrorTrigger.CONTROLLER_AND_DISPLAY) }
+        }
+    }
+}
+
+internal fun GestureAction.label(): String = when (this) {
+    GestureAction.NONE -> "None"
+    GestureAction.HOME -> "Home"
+    GestureAction.BACK -> "Back"
+    GestureAction.RECENTS -> "Recents"
+    GestureAction.CLOSE_APP -> "Close app"
+    GestureAction.TOGGLE_VIRTUAL_MOUSE -> "Virtual mouse toggle"
+    GestureAction.SLEEP -> "Sleep"
+}
+
+@Composable
+internal fun GestureActionPicker(
+    title: String,
+    selected: GestureAction,
+    onSelect: (GestureAction) -> Unit,
+    onClose: () -> Unit,
+) {
+    Dialog(onDismissRequest = onClose) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF1A2230))
+                .border(1.dp, Palette.border, RoundedCornerShape(14.dp))
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+        ) {
+            Text(title, color = Palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(14.dp))
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                GestureAction.entries.forEach { action ->
+                    PickerOption(name = action.label(), selected = action == selected) { onSelect(action) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ControllerPickerDialog(
+    title: String,
+    automaticLabel: String,
+    emptyMessage: String,
+    devices: List<ControllerDevice>,
+    selectedGuid: String?,
+    onSelect: (String?) -> Unit,
+    onClose: () -> Unit,
+) {
+    Dialog(onDismissRequest = onClose) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF1A2230))
+                .border(1.dp, Palette.border, RoundedCornerShape(14.dp))
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+        ) {
+            Text(title, color = Palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
             Spacer(Modifier.height(14.dp))
             Column(
                 modifier = Modifier
                     .heightIn(max = 280.dp)
                     .verticalScroll(rememberScrollState()),
             ) {
-                PickerOption(name = "Automatic (detect)", selected = selectedGuid == null) { onSelect(null) }
+                PickerOption(name = automaticLabel, selected = selectedGuid == null) { onSelect(null) }
                 if (devices.isEmpty()) {
                     Text(
-                        "No controllers detected. Connect the built-in controller and try again.",
+                        emptyMessage,
                         color = Palette.textSecondary,
                         fontSize = 13.sp,
                         modifier = Modifier.padding(vertical = 12.dp),
                     )
                 } else {
+                    val duplicateNames = devices.groupingBy { it.name.lowercase() }.eachCount()
                     devices.forEach { device ->
                         PickerOption(
-                            name = device.name,
+                            name = if ((duplicateNames[device.name.lowercase()] ?: 0) > 1) {
+                                "${device.name} · Controller ${device.controllerNumber}"
+                            } else {
+                                device.name
+                            },
                             selected = device.guid.isNotEmpty() && device.guid == selectedGuid,
                         ) { if (device.guid.isNotEmpty()) onSelect(device.guid) }
                     }

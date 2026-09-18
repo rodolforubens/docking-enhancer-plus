@@ -36,6 +36,22 @@ class AndroidInputDeviceRepositoryTest {
     }
 
     @Test
+    fun parseProcInputBlockExtractsBluetoothAddressAndSysfsInputNumber() {
+        val block = """
+            I: Bus=0005 Vendor=045e Product=0b13 Version=0101
+            N: Name="Xbox Wireless Controller"
+            S: Sysfs=/devices/virtual/misc/uhid/0005:045E:0B13.0063/input/input173
+            U: Uniq=14:CB:65:B7:E8:ED
+            H: Handlers=event11 cpufreq
+        """.trimIndent()
+
+        val entry = repository.parseProcInputBlock(block)
+
+        assertEquals("14:CB:65:B7:E8:ED", entry?.uniqueId)
+        assertEquals(173, entry?.sysfsInputNumber)
+    }
+
+    @Test
     fun parseProcInputBlockReturnsNullWhenIdentityLineMissing() {
         val block = """
             N: Name="Orphan device"
@@ -213,6 +229,113 @@ class AndroidInputDeviceRepositoryTest {
         assertEquals("/dev/input/event10", result?.path)
         assertEquals("/dev/input/event10", result?.hideNodePath)
         assertFalse(result?.isInternal == true)
+    }
+
+    @Test
+    fun thorSameNameControllersResolveToDifferentNodesAndKeepTheirDescriptors() {
+        // Thor's AYN mapper may publish both pads as 2020:0111. When the built-in pad is also named
+        // like an Xbox controller, vendor/product and name cannot distinguish the two; resolving the
+        // list as a group must reserve one event node per Android InputDevice.
+        val repoNoRealDev = AndroidInputDeviceRepository(pathExists = { it != "/dev/input/event9" })
+        val candidates = listOf(
+            ControllerCandidate(
+                name = "Xbox Wireless Controller",
+                vendorId = ODIN_VENDOR,
+                productId = 0x0111,
+                controllerNumber = 1,
+                guid = "thor-built-in-descriptor",
+            ),
+            ControllerCandidate(
+                name = "Xbox Wireless Controller",
+                vendorId = ODIN_VENDOR,
+                productId = 0x0111,
+                controllerNumber = 2,
+                guid = "xbox-external-descriptor",
+            ),
+        )
+        val entries = listOf(
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0111, "event2"),
+            // The real Xbox identity remains in /proc but its node is removed by the AYN mapper.
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13, "event9"),
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0111, "event10"),
+        )
+
+        val resolved = repoNoRealDev.resolveControllerDevices(
+            candidates = candidates,
+            entries = entries,
+            mirroredNames = repoNoRealDev.computeMirroredNames(entries),
+        ).sortedBy { it.controllerNumber }
+        val classified = repoNoRealDev.resolveInternalController(resolved, manualGuid = null)
+
+        assertEquals(listOf("/dev/input/event2", "/dev/input/event10"), classified.map { it.path })
+        assertEquals(listOf("thor-built-in-descriptor", "xbox-external-descriptor"), classified.map { it.guid })
+        assertTrue(classified[0].isInternal)
+        assertFalse(classified[1].isInternal)
+    }
+
+    @Test
+    fun thorVirtualMouseDoesNotStealExternalControllerWithSameVendorProduct() {
+        val candidate = ControllerCandidate(
+            name = "Xbox Wireless Controller",
+            vendorId = ODIN_VENDOR,
+            productId = 0x0111,
+            controllerNumber = 3,
+            guid = "xbox-external-descriptor",
+        )
+        val entries = listOf(
+            procEntry("ODIN Station Virtual Mouse", BUS_USB, ODIN_VENDOR, 0x0111, "event10"),
+            procEntry("Xbox Wireless Controller", BUS_USB, ODIN_VENDOR, 0x0111, "event12"),
+            procEntry("Xbox Wireless Controller", BUS_BLUETOOTH, 0x045e, 0x0b13, "event11"),
+        )
+
+        val result = repository.resolveControllerDevice(
+            candidate = candidate,
+            entries = entries,
+            mirroredNames = repository.computeMirroredNames(entries),
+        )
+
+        assertEquals("/dev/input/event12", result?.path)
+        assertFalse(result?.isInternal == true)
+        assertEquals(MappingKey.of(0x045e, 0x0b13), result?.mappingKey)
+    }
+
+    @Test
+    fun externalBluetoothControllerUsesItsUserAssignedAlias() {
+        val candidate = ControllerCandidate(
+            name = "Xbox Wireless Controller",
+            vendorId = ODIN_VENDOR,
+            productId = 0x0111,
+            controllerNumber = 3,
+            guid = "xbox-external-descriptor",
+        )
+        val entries = listOf(
+            procEntry(
+                "Xbox Wireless Controller",
+                BUS_BLUETOOTH,
+                0x045e,
+                0x0b13,
+                "event11",
+                uniqueId = "14:CB:65:B7:E8:ED",
+                sysfsInputNumber = 173,
+            ),
+            procEntry(
+                "Xbox Wireless Controller",
+                BUS_USB,
+                ODIN_VENDOR,
+                0x0111,
+                "event12",
+                sysfsInputNumber = 174,
+            ),
+        )
+
+        val result = repository.resolveControllerDevice(
+            candidate = candidate,
+            entries = entries,
+            mirroredNames = repository.computeMirroredNames(entries),
+            bluetoothAliases = mapOf("14:cb:65:b7:e8:ed" to "Xbox Wireless Controller 2"),
+        )
+
+        assertEquals("Xbox Wireless Controller 2", result?.name)
     }
 
     // -- hiddenSourceDevice (re-materialise a hidden mirror source from /proc) -----------
@@ -468,6 +591,8 @@ class AndroidInputDeviceRepositoryTest {
         vendorId: Int,
         productId: Int,
         eventName: String = "event${entrySequence++}",
+        uniqueId: String? = null,
+        sysfsInputNumber: Int? = null,
     ) = AndroidInputDeviceRepository.ProcInputEntry(
         name = name,
         handlers = listOf(eventName),
@@ -476,6 +601,8 @@ class AndroidInputDeviceRepositoryTest {
         bus = bus,
         vendorId = vendorId,
         productId = productId,
+        uniqueId = uniqueId,
+        sysfsInputNumber = sysfsInputNumber,
     )
 
     private var entrySequence = 0

@@ -17,10 +17,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -32,6 +31,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -55,8 +55,8 @@ internal fun Header(enabled: Boolean, docked: Boolean, loading: Boolean) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusPill(if (enabled) "ACTIVE" else "INACTIVE", enabled)
-            StatusPill(if (docked) "DOCKED" else "UNDOCKED", docked)
+            StatusPill(if (enabled) "MIRROR ON" else "MIRROR OFF", enabled)
+            StatusPill(if (docked) "EXTERNAL DISPLAY" else "NO EXTERNAL DISPLAY", docked)
         }
     }
 }
@@ -220,12 +220,12 @@ internal fun MappingBadge(text: String, ink: Color, fill: Color, modifier: Modif
 }
 
 @Composable
-internal fun SettingRow(
+internal fun ChoiceSettingRow(
     title: String,
     description: String,
-    checked: Boolean,
+    value: String,
     enabled: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+    onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -241,7 +241,7 @@ internal fun SettingRow(
                 color = if (focused) Palette.focus else Palette.border,
                 shape = shape,
             )
-            .clickable(interactionSource = interaction, indication = null, enabled = enabled) { onCheckedChange(!checked) }
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -251,16 +251,15 @@ internal fun SettingRow(
             Spacer(Modifier.height(4.dp))
             Text(description, color = Palette.textSecondary, fontSize = 12.sp)
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color(0xFFD7F1FF),
-                checkedTrackColor = Color(0xFF1585C3),
-                uncheckedThumbColor = Color(0xFF7E8494),
-                uncheckedTrackColor = Color(0xFF2B2D38),
-            ),
+        Text(
+            text = value,
+            color = Palette.accent,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 132.dp),
         )
     }
 }

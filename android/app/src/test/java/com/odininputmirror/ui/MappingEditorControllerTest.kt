@@ -1,12 +1,15 @@
 package com.odininputmirror.ui
 
 import com.odininputmirror.domain.model.Binding
+import com.odininputmirror.domain.model.AutoMirrorTrigger
 import com.odininputmirror.domain.model.CaptureKind
 import com.odininputmirror.domain.model.CaptureRead
 import com.odininputmirror.domain.model.CaptureResult
 import com.odininputmirror.domain.model.ControlRef
+import com.odininputmirror.domain.model.ControllerGesture
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.ControllerMapping
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
@@ -220,11 +223,11 @@ class MappingEditorControllerTest {
         override fun getSettings() = MirrorSettings()
         override fun saveStarted(request: MirrorStartRequest, startedAt: Long) = Unit
         override fun setExpectedRunning(expectedRunning: Boolean) = Unit
-        override fun setHomeAsBackEnabled(enabled: Boolean) = Unit
-        override fun setComboHoldKillAppEnabled(enabled: Boolean) = Unit
-        override fun setVirtualMouseEnabled(enabled: Boolean) = Unit
+        override fun setGestureAction(gesture: ControllerGesture, action: GestureAction) = Unit
         override fun setAutoMirrorEnabled(enabled: Boolean) = Unit
+        override fun setAutoMirrorTrigger(trigger: AutoMirrorTrigger) = Unit
         override fun setManualInternalController(guid: String?) = Unit
+        override fun setManualExternalController(guid: String?) = Unit
         override fun bumpConfigGeneration() {
             bumps++
         }

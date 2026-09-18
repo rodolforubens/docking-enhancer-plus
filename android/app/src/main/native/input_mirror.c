@@ -19,7 +19,9 @@
 #include "mouse.h"
 
 static volatile sig_atomic_t keep_running = 1;
-static const long long COMBO_HOLD_KILL_APP_MS = 3000;
+static const long long SELECT_START_HOLD_MS = 3000;
+static const long long HOME_HOLD_MS = 500;
+static const long long HOME_DOUBLE_TAP_MS = 325;
 static const long long HEARTBEAT_INTERVAL_MS = 1000;
 // Consecutive beats the heartbeat path may stay missing before we conclude this daemon has no owner
 // left and shut down. The app deletes that path exactly when it wants us gone (it was uninstalled,
@@ -32,11 +34,9 @@ static const int HEARTBEAT_MISSING_LIMIT = 5;
 // a single frame rarely exceeds ~10 events; any overflow is drained by the next loop.
 #define EVENT_BATCH_SIZE 32
 
-// Virtual mouse mode (opt-in via --virtual-mouse). Select+R3 held this long toggles the mode; while
-// on, the grabbed controller drives a self-created uinput pointer instead of the target node. The
-// pointer itself lives in mouse.c; what stays here is the combo that summons it and the shell
-// command it occasionally asks for.
-static const long long MOUSE_TOGGLE_HOLD_MS = 500;
+// Default hold threshold for Select+R3. The assigned action is configurable; while mouse mode is on,
+// the grabbed controller drives a self-created uinput pointer instead of the target node.
+static const long long SELECT_R3_HOLD_MS = 500;
 
 /*
  * In Odin mode we remap the four face buttons of a mirrored external controller to the
@@ -68,6 +68,18 @@ static const long long MOUSE_TOGGLE_HOLD_MS = 500;
 #endif
 #ifndef BTN_START
 #define BTN_START 0x13b
+#endif
+#ifndef BTN_DPAD_UP
+#define BTN_DPAD_UP 0x220
+#endif
+#ifndef BTN_DPAD_DOWN
+#define BTN_DPAD_DOWN 0x221
+#endif
+#ifndef BTN_DPAD_LEFT
+#define BTN_DPAD_LEFT 0x222
+#endif
+#ifndef BTN_DPAD_RIGHT
+#define BTN_DPAD_RIGHT 0x223
 #endif
 #define ODIN_VENDOR_ID 0x2020
 #define ODIN_NINTENDO_PRODUCT_ID 0x0111
@@ -254,17 +266,24 @@ struct mirror_state {
     long long config_generation;
 
     const char *heartbeat_file_path;
+    const char *recents_state_file_path;
+    const char *recents_events_file_path;
     int heartbeat_fd;  // held open for the whole run; rewritten in place each beat
     int heartbeat_created;  // the opening beat made the file; later reopens must never re-create it
     int heartbeat_missing_beats;  // consecutive beats the heartbeat PATH has been gone
-    int home_as_back;
-    int combo_hold_kill_app;
-    int virtual_mouse;
+    int home_single_action;
+    int home_double_action;
+    int home_hold_action;
+    int select_start_hold_action;
+    int select_r3_hold_action;
     int swap_nintendo_layout;
-    // A Home press we swallowed and still owe a release for. Tracked so turning Home-as-Back off
-    // mid-hold keeps swallowing that press to completion instead of handing the target a release
-    // for a key it never saw go down.
+    // Current Home press plus the first tap waiting for a possible second tap.
     int home_swallowed;
+    int home_hold_triggered;
+    int home_second_tap;
+    long long home_pressed_at_ms;
+    int home_single_pending;
+    long long home_single_deadline_ms;
 
     // Select+Start "close app" combo.
     int select_pressed;
@@ -299,6 +318,13 @@ struct mirror_state {
     int abs_present[ABS_CNT];
     int abs_neutral[ABS_CNT];
     int abs_last[ABS_CNT];
+
+    // While Launcher3 overview is visible, controller navigation is sent to its accessibility
+    // service instead of the target node. This bypasses games that consume every controller key
+    // while their task is still the focused window under the Recents animation.
+    int recents_active;
+    int recents_hat_x;
+    int recents_hat_y;
 };
 
 // Stamp the heartbeat by rewriting the held-open file in place. The watchdog on the app side only
@@ -394,6 +420,89 @@ static void release_target_holds(struct mirror_state *s) {
     emit_event(s->target_fd, EV_SYN, SYN_REPORT, 0);
 }
 
+static void update_recents_mode(struct mirror_state *s) {
+    int active = s->recents_state_file_path != NULL &&
+        access(s->recents_state_file_path, F_OK) == 0;
+    if (active == s->recents_active) {
+        return;
+    }
+
+    if (active) {
+        release_target_holds(s);
+        s->select_pressed = 0;
+        s->start_pressed = 0;
+        s->thumbr_pressed = 0;
+        s->combo_triggered = 0;
+        s->mouse_combo_triggered = 0;
+        s->combo_pressed_at_ms = 0;
+        s->mouse_combo_pressed_at_ms = 0;
+        s->home_single_pending = 0;
+        s->home_single_deadline_ms = 0;
+    }
+    s->recents_hat_x = 0;
+    s->recents_hat_y = 0;
+    s->recents_active = active;
+}
+
+static void send_recents_command(struct mirror_state *s, const char *command) {
+    if (s->recents_events_file_path == NULL) {
+        return;
+    }
+    int fd = open(s->recents_events_file_path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    if (fd < 0) {
+        return;
+    }
+    size_t length = strlen(command);
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = write(fd, command + written, length - written);
+        if (result > 0) {
+            written += (size_t)result;
+        } else if (result < 0 && errno == EINTR) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    close(fd);
+}
+
+// Consume one event while Recents owns the controller. Commands are appended as whole lines; the
+// accessibility service applies them directly to Launcher3 task nodes, outside the focused app's
+// key-dispatch path.
+static void handle_recents_event(struct mirror_state *s, const struct input_event *event) {
+    if (event->type == EV_KEY && (event->value == 1 || event->value == 2)) {
+        switch (event->code) {
+            case BTN_DPAD_LEFT:
+            case KEY_LEFT:
+                send_recents_command(s, "left\n");
+                return;
+            case BTN_DPAD_RIGHT:
+            case KEY_RIGHT:
+                send_recents_command(s, "right\n");
+                return;
+            case BTN_SOUTH:
+                if (event->value == 1) send_recents_command(s, "resume\n");
+                return;
+            case BTN_WEST:
+                if (event->value == 1) send_recents_command(s, "close\n");
+                return;
+            default:
+                return;
+        }
+    }
+
+    if (event->type == EV_ABS && event->code == ABS_HAT0X) {
+        int direction = event->value < 0 ? -1 : event->value > 0 ? 1 : 0;
+        if (direction != 0 && direction != s->recents_hat_x) {
+            send_recents_command(s, direction < 0 ? "left\n" : "right\n");
+        }
+        s->recents_hat_x = direction;
+    } else if (event->type == EV_ABS && event->code == ABS_HAT0Y) {
+        s->recents_hat_y = event->value < 0 ? -1 : event->value > 0 ? 1 : 0;
+    }
+}
+
 // Hand control to the pointer, then quiesce the target — in that order, because a pointer that fails
 // to come up leaves us in gamepad mode with everything still forwarding, and releasing the user's
 // held buttons on the way to not changing anything would be a visible glitch for no reason.
@@ -409,16 +518,33 @@ static void leave_mouse_mode(struct mirror_state *s) {
     mouse_leave(&s->mouse);
 }
 
+static int config_has_action(const struct config *config, int action) {
+    return config->home_single_action == action ||
+        config->home_double_action == action ||
+        config->home_hold_action == action ||
+        config->select_start_hold_action == action ||
+        config->select_r3_hold_action == action;
+}
+
 // Poll timeout for the next iteration: fast while a hold combo is pending (to catch the threshold
 // without new events) or in mouse mode (frame cadence), otherwise idle at 1s (heartbeat rate).
 static int compute_loop_timeout(const struct mirror_state *s) {
     int timeout_ms = 1000;
     if (s->mouse.mode) {
         timeout_ms = (int)MOUSE_FRAME_INTERVAL_MS;
-    } else if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered) {
+    } else if (s->select_start_hold_action != ACTION_NONE &&
+               s->select_pressed && s->start_pressed && !s->combo_triggered) {
         timeout_ms = 50;
     }
-    if (s->virtual_mouse && s->select_pressed && s->thumbr_pressed && !s->mouse_combo_triggered && timeout_ms > 50) {
+    if (s->select_r3_hold_action != ACTION_NONE && s->select_pressed && s->thumbr_pressed &&
+        !s->mouse_combo_triggered && timeout_ms > 50) {
+        timeout_ms = 50;
+    }
+    if (s->home_hold_action != ACTION_NONE && s->home_swallowed &&
+        !s->home_hold_triggered && timeout_ms > 50) {
+        timeout_ms = 50;
+    }
+    if (s->home_single_pending && timeout_ms > 50) {
         timeout_ms = 50;
     }
     return timeout_ms;
@@ -427,31 +553,34 @@ static int compute_loop_timeout(const struct mirror_state *s) {
 /*
  * Adopt a freshly parsed config.
  *
- * The reason this is not `*current = *next` is that a flag turning OFF may own live state only the
- * old value knows how to unwind. Mouse mode is the clear case: dropping --virtual-mouse while the
- * pointer exists would strand a uinput device and a visible cursor with nothing left that would ever
- * destroy them. So unwind first against the OLD values, then adopt.
+ * The reason this is not `*current = *next` is that a changed assignment may own live state only the
+ * old configuration knows how to unwind. Mouse mode is the clear case: removing its last toggle
+ * while the pointer exists would strand a uinput device and a visible cursor with no way out.
  *
  * Turning a flag ON needs no such care — every feature here starts from an idle state.
  */
 static void apply_config(struct mirror_state *s, const struct config *next) {
-    if (s->virtual_mouse && !next->virtual_mouse) {
-        if (s->mouse.mode) {
-            leave_mouse_mode(s);
-        }
+    if (s->mouse.mode && !config_has_action(next, ACTION_TOGGLE_VIRTUAL_MOUSE)) {
+        leave_mouse_mode(s);
+    }
+    if (s->select_r3_hold_action != next->select_r3_hold_action) {
         s->mouse_combo_triggered = 0;
         s->mouse_combo_pressed_at_ms = 0;
     }
-    if (s->combo_hold_kill_app && !next->combo_hold_kill_app) {
-        // Drop a hold in progress so re-enabling later doesn't inherit a stale, already-expired
-        // timer and fire the moment both buttons are next seen down.
+    if (s->select_start_hold_action != next->select_start_hold_action) {
         s->combo_triggered = 0;
         s->combo_pressed_at_ms = 0;
     }
 
-    s->home_as_back = next->home_as_back;
-    s->combo_hold_kill_app = next->combo_hold_kill_app;
-    s->virtual_mouse = next->virtual_mouse;
+    s->home_single_action = next->home_single_action;
+    s->home_double_action = next->home_double_action;
+    s->home_hold_action = next->home_hold_action;
+    s->select_start_hold_action = next->select_start_hold_action;
+    s->select_r3_hold_action = next->select_r3_hold_action;
+    if (s->home_double_action == ACTION_NONE) {
+        s->home_single_pending = 0;
+        s->home_single_deadline_ms = 0;
+    }
     s->config_generation = next->generation;
 
     // Adopting a mapping needs no unwinding: it only decides what the NEXT event is forwarded as.
@@ -498,33 +627,58 @@ static enum control_command drain_control(int fd) {
     return command;
 }
 
-// Flip mouse mode if Select+R3 has been held past the threshold. Checked every loop because the hold
-// may complete on a poll timeout with no new event.
-static void maybe_toggle_mouse_mode(struct mirror_state *s) {
-    if (!s->virtual_mouse || !s->select_pressed || !s->thumbr_pressed || s->mouse_combo_triggered ||
-        now_ms() - s->mouse_combo_pressed_at_ms < MOUSE_TOGGLE_HOLD_MS) {
+static void perform_action(struct mirror_state *s, int action) {
+    switch (action) {
+        case ACTION_HOME:
+            run_detached("input keyevent 3");
+            break;
+        case ACTION_BACK:
+            run_detached("input keyevent 4");
+            break;
+        case ACTION_RECENTS:
+            run_detached("input keyevent 187");
+            break;
+        case ACTION_CLOSE_APP:
+            force_stop_foreground_app();
+            break;
+        case ACTION_TOGGLE_VIRTUAL_MOUSE:
+            if (s->mouse.mode) {
+                leave_mouse_mode(s);
+            } else {
+                enter_mouse_mode(s);
+            }
+            break;
+        case ACTION_SLEEP:
+            run_detached("input keyevent 223");
+            break;
+        case ACTION_NONE:
+        default:
+            break;
+    }
+}
+
+static void maybe_trigger_select_r3_hold(struct mirror_state *s) {
+    if (s->select_r3_hold_action == ACTION_NONE || !s->select_pressed || !s->thumbr_pressed ||
+        s->mouse_combo_triggered ||
+        now_ms() - s->mouse_combo_pressed_at_ms < SELECT_R3_HOLD_MS) {
         return;
     }
     s->mouse_combo_triggered = 1;
-    if (!s->mouse.mode) {
-        enter_mouse_mode(s);
-    } else {
-        leave_mouse_mode(s);
-    }
+    perform_action(s, s->select_r3_hold_action);
 }
 
-// Fire the kill-app combo when it completes on a poll timeout (no new event to carry it over).
-static void maybe_kill_combo_on_timeout(struct mirror_state *s) {
-    if (s->combo_hold_kill_app && s->select_pressed && s->start_pressed && !s->combo_triggered &&
-        now_ms() - s->combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS) {
-        force_stop_foreground_app();
-        s->combo_triggered = 1;
+static void maybe_trigger_select_start_hold(struct mirror_state *s) {
+    if (s->select_start_hold_action == ACTION_NONE || !s->select_pressed || !s->start_pressed ||
+        s->combo_triggered ||
+        now_ms() - s->combo_pressed_at_ms < SELECT_START_HOLD_MS) {
+        return;
     }
+    s->combo_triggered = 1;
+    perform_action(s, s->select_start_hold_action);
 }
 
-// Track Select/Start/R3 press state (read by both combos) and (re)arm the mouse-toggle hold. Only a
-// combo key's own press may (re)arm the timer, so another button pressed while both are held can't
-// reset an in-progress hold. Called for every EV_KEY event.
+// Track the three buttons shared by the two hold gestures. A timer starts exactly when the second
+// button in a pair goes down and is cleared as soon as either button comes up.
 static void update_combo_tracking(struct mirror_state *s, const struct input_event *ev) {
     if (is_select_button(ev->code)) {
         if (ev->value == 1) s->select_pressed = 1;
@@ -537,59 +691,97 @@ static void update_combo_tracking(struct mirror_state *s, const struct input_eve
         else if (ev->value == 0) s->thumbr_pressed = 0;
     }
 
-    if (s->virtual_mouse) {
-        int is_mouse_combo_key = is_select_button(ev->code) || ev->code == BTN_THUMBR;
-        if (is_mouse_combo_key && ev->value == 1 && s->select_pressed && s->thumbr_pressed) {
-            s->mouse_combo_pressed_at_ms = now_ms();
-            s->mouse_combo_triggered = 0;
-        }
-        if (ev->value == 0 && (!s->select_pressed || !s->thumbr_pressed)) {
-            s->mouse_combo_triggered = 0;
-        }
-    }
-}
-
-// Home-as-Back: swallow the Home button entirely (press, repeat and release) so the target never
-// sees a Home-down without its up, and inject Back once, on release. Returns 1 if the event was
-// consumed (must not be forwarded).
-static int handle_home_as_back(struct mirror_state *s, const struct input_event *ev) {
-    if (ev->type != EV_KEY || !is_home_button(ev->code)) {
-        return 0;
-    }
-    // Keep swallowing a press we already swallowed even if the setting was turned off mid-hold: the
-    // target never saw that key go down, so letting its release through would be a release out of
-    // nowhere. The press finishes under the rules it started with.
-    if (!s->home_as_back && !s->home_swallowed) {
-        return 0;
-    }
-    if (ev->value == 1) {
-        s->home_swallowed = 1;
-    } else if (ev->value == 0) {
-        s->home_swallowed = 0;
-        run_detached("input keyevent 4");
-    }
-    return 1;
-}
-
-// Advance the Select+Start "close app" combo on a Select/Start event.
-static void handle_kill_combo_event(struct mirror_state *s, const struct input_event *ev) {
-    if (!s->combo_hold_kill_app || ev->type != EV_KEY ||
-        !(is_select_button(ev->code) || is_start_button(ev->code))) {
-        return;
-    }
-    if (ev->value == 1 && s->select_pressed && s->start_pressed) {
+    int select_event = is_select_button(ev->code);
+    if (s->select_start_hold_action != ACTION_NONE && ev->value == 1 &&
+        (select_event || is_start_button(ev->code)) && s->select_pressed && s->start_pressed) {
         s->combo_pressed_at_ms = now_ms();
         s->combo_triggered = 0;
     }
-    if ((ev->value == 2 || ev->value == 0) && s->select_pressed && s->start_pressed &&
-        !s->combo_triggered && now_ms() - s->combo_pressed_at_ms >= COMBO_HOLD_KILL_APP_MS) {
-        force_stop_foreground_app();
-        s->combo_triggered = 1;
-    }
-    if (ev->value == 0 && !s->select_pressed && !s->start_pressed) {
-        s->combo_triggered = 0;
+    if (!s->select_pressed || !s->start_pressed) {
         s->combo_pressed_at_ms = 0;
+        s->combo_triggered = 0;
     }
+
+    if (s->select_r3_hold_action != ACTION_NONE && ev->value == 1 &&
+        (select_event || ev->code == BTN_THUMBR) && s->select_pressed && s->thumbr_pressed) {
+        s->mouse_combo_pressed_at_ms = now_ms();
+        s->mouse_combo_triggered = 0;
+    }
+    if (!s->select_pressed || !s->thumbr_pressed) {
+        s->mouse_combo_pressed_at_ms = 0;
+        s->mouse_combo_triggered = 0;
+    }
+}
+
+static void reset_home_press(struct mirror_state *s) {
+    s->home_swallowed = 0;
+    s->home_hold_triggered = 0;
+    s->home_second_tap = 0;
+    s->home_pressed_at_ms = 0;
+}
+
+// A single tap cannot be emitted until the double-tap window closes. Checked on every loop so Back
+// arrives even when the controller sends no further events.
+static void maybe_finish_home_single(struct mirror_state *s) {
+    if (!s->home_single_pending || now_ms() < s->home_single_deadline_ms) {
+        return;
+    }
+    perform_action(s, s->home_single_action);
+    s->home_single_pending = 0;
+    s->home_single_deadline_ms = 0;
+}
+
+// Complete a held Home without waiting for a repeat or release event. Android's normal HOME key is
+// injected once at the threshold; the physical release remains swallowed later.
+static void maybe_trigger_home_hold(struct mirror_state *s) {
+    if (!s->home_swallowed || s->home_hold_triggered ||
+        now_ms() - s->home_pressed_at_ms < HOME_HOLD_MS) {
+        return;
+    }
+    perform_action(s, s->home_hold_action);
+    s->home_hold_triggered = 1;
+}
+
+// Recognise Home tap, hold and double-tap as mutually exclusive gestures. The physical button is
+// always swallowed: ACTION_NONE means "do nothing", not "fall through to Android's default Home".
+static int handle_home_gestures(struct mirror_state *s, const struct input_event *ev) {
+    if (ev->type != EV_KEY || !is_home_button(ev->code)) {
+        return 0;
+    }
+    if (ev->value == 1) {
+        maybe_finish_home_single(s);
+        long long now = now_ms();
+        s->home_second_tap = s->home_double_action != ACTION_NONE && s->home_single_pending &&
+            now <= s->home_single_deadline_ms;
+        if (s->home_second_tap) {
+            s->home_single_pending = 0;
+            s->home_single_deadline_ms = 0;
+        }
+        s->home_swallowed = 1;
+        s->home_hold_triggered = 0;
+        s->home_pressed_at_ms = now;
+    } else if (ev->value == 0) {
+        if (!s->home_swallowed) {
+            return 0;
+        }
+        maybe_trigger_home_hold(s);
+        if (!s->home_hold_triggered) {
+            if (s->home_second_tap && s->home_double_action != ACTION_NONE) {
+                perform_action(s, s->home_double_action);
+            } else if (s->home_double_action != ACTION_NONE) {
+                s->home_single_pending = 1;
+                s->home_single_deadline_ms = now_ms() + HOME_DOUBLE_TAP_MS;
+            } else {
+                perform_action(s, s->home_single_action);
+            }
+        }
+        reset_home_press(s);
+    } else if (!s->home_swallowed) {
+        return 0;
+    } else {
+        maybe_trigger_home_hold(s);
+    }
+    return 1;
 }
 
 // Forward one event to the target: apply the Nintendo face-button swap, record what the target now
@@ -627,6 +819,17 @@ static int forward_event(struct mirror_state *s, const struct input_event *ev) {
     return 0;
 }
 
+static int parse_action_code(const char *text, int *out) {
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (end == text || *end != '\0' || value < ACTION_NONE ||
+        value > ACTION_SLEEP) {
+        return -1;
+    }
+    *out = (int)value;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     // Heal mode (no mirroring): restore nodes a crashed session left hidden, then exit. Invoked as
     // `input_mirror --heal --hidden-state-file PATH`. Detected up front so the source/target
@@ -648,7 +851,7 @@ int main(int argc, char **argv) {
     }
 
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-as-back] [--combo-hold-kill-app] [--virtual-mouse] [--hide-node PATH]... [--hidden-state-file PATH] [--config-file PATH] [--control-fifo PATH] [--capture-file PATH] [--pid-file PATH] [--heartbeat-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
+        fprintf(stderr, "Usage: %s /dev/input/eventSOURCE /dev/input/eventTARGET [--home-single-action N] [--home-double-action N] [--home-hold-action N] [--select-start-hold-action N] [--select-r3-hold-action N] [--hide-node PATH]... [--hidden-state-file PATH] [--config-file PATH] [--control-fifo PATH] [--capture-file PATH] [--pid-file PATH] [--heartbeat-file PATH] [--recents-state-file PATH] [--recents-events-file PATH]\n       %s --heal --hidden-state-file PATH\n", argv[0], argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -660,15 +863,57 @@ int main(int argc, char **argv) {
     const char *config_path = NULL;
     const char *control_fifo_path = NULL;
     const char *capture_file_path = NULL;
-    int home_as_back = 0;
-    int combo_hold_kill_app = 0;
-    int virtual_mouse = 0;
+    const char *recents_state_file_path = NULL;
+    const char *recents_events_file_path = NULL;
+    int home_single_action = ACTION_NONE;
+    int home_double_action = ACTION_NONE;
+    int home_hold_action = ACTION_NONE;
+    int select_start_hold_action = ACTION_NONE;
+    int select_r3_hold_action = ACTION_NONE;
     const char *hide_paths[MAX_HIDE_NODES];
     int hide_count = 0;
 
     for (int index = 3; index < argc; index++) {
+        int *action_target = NULL;
+        if (strcmp(argv[index], "--home-single-action") == 0) {
+            action_target = &home_single_action;
+        } else if (strcmp(argv[index], "--home-double-action") == 0) {
+            action_target = &home_double_action;
+        } else if (strcmp(argv[index], "--home-hold-action") == 0) {
+            action_target = &home_hold_action;
+        } else if (strcmp(argv[index], "--select-start-hold-action") == 0) {
+            action_target = &select_start_hold_action;
+        } else if (strcmp(argv[index], "--select-r3-hold-action") == 0) {
+            action_target = &select_r3_hold_action;
+        }
+        if (action_target != NULL) {
+            const char *action_option = argv[index];
+            if (index + 1 >= argc || parse_action_code(argv[++index], action_target) != 0) {
+                fprintf(stderr, "Invalid action code for %s\n", action_option);
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+
+        // Compatibility with the previous direct-daemon flags used by existing test scripts.
+        if (strcmp(argv[index], "--home-tap-back") == 0) {
+            home_single_action = ACTION_BACK;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--home-hold-home") == 0) {
+            home_hold_action = ACTION_HOME;
+            continue;
+        }
+
+        if (strcmp(argv[index], "--home-double-tap-recents") == 0) {
+            home_double_action = ACTION_RECENTS;
+            continue;
+        }
+
         if (strcmp(argv[index], "--home-as-back") == 0) {
-            home_as_back = 1;
+            home_single_action = ACTION_BACK;
+            home_hold_action = ACTION_HOME;
             continue;
         }
 
@@ -687,12 +932,12 @@ int main(int argc, char **argv) {
         }
 
         if (strcmp(argv[index], "--combo-hold-kill-app") == 0) {
-            combo_hold_kill_app = 1;
+            select_start_hold_action = ACTION_CLOSE_APP;
             continue;
         }
 
         if (strcmp(argv[index], "--virtual-mouse") == 0) {
-            virtual_mouse = 1;
+            select_r3_hold_action = ACTION_TOGGLE_VIRTUAL_MOUSE;
             continue;
         }
 
@@ -721,6 +966,16 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        if (strcmp(argv[index], "--recents-state-file") == 0 && index + 1 < argc) {
+            recents_state_file_path = argv[++index];
+            continue;
+        }
+
+        if (strcmp(argv[index], "--recents-events-file") == 0 && index + 1 < argc) {
+            recents_events_file_path = argv[++index];
+            continue;
+        }
+
         fprintf(stderr, "Unknown argument: %s\n", argv[index]);
         return EXIT_FAILURE;
     }
@@ -737,9 +992,13 @@ int main(int argc, char **argv) {
     s.control_fd = -1;
     s.heartbeat_fd = -1;
     s.heartbeat_file_path = heartbeat_file_path;
-    s.home_as_back = home_as_back;
-    s.combo_hold_kill_app = combo_hold_kill_app;
-    s.virtual_mouse = virtual_mouse;
+    s.recents_state_file_path = recents_state_file_path;
+    s.recents_events_file_path = recents_events_file_path;
+    s.home_single_action = home_single_action;
+    s.home_double_action = home_double_action;
+    s.home_hold_action = home_hold_action;
+    s.select_start_hold_action = select_start_hold_action;
+    s.select_r3_hold_action = select_r3_hold_action;
     s.capture.first_axis = -1;
     s.capture.log_path = capture_file_path;
 
@@ -803,9 +1062,11 @@ int main(int argc, char **argv) {
     // than with the flags of whichever launch happened to create it.
     if (config_path != NULL) {
         struct config from_flags = {
-            .home_as_back = s.home_as_back,
-            .combo_hold_kill_app = s.combo_hold_kill_app,
-            .virtual_mouse = s.virtual_mouse,
+            .home_single_action = s.home_single_action,
+            .home_double_action = s.home_double_action,
+            .home_hold_action = s.home_hold_action,
+            .select_start_hold_action = s.select_start_hold_action,
+            .select_r3_hold_action = s.select_r3_hold_action,
             .generation = 0,
         };
         struct config initial = from_flags;
@@ -851,6 +1112,7 @@ int main(int argc, char **argv) {
     write_hidden_state(hidden_state_path, hidden, hide_count);
 
     while (keep_running) {
+        update_recents_mode(&s);
         int timeout_ms = compute_loop_timeout(&s);
 
         long long heartbeat_now_ms = now_ms();
@@ -894,8 +1156,10 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // The mouse toggle may complete on a poll timeout with no new event, so check it every loop.
-        maybe_toggle_mouse_mode(&s);
+        // Timed gestures may complete on a poll timeout with no new controller event.
+        maybe_trigger_select_r3_hold(&s);
+        maybe_trigger_select_start_hold(&s);
+        maybe_finish_home_single(&s);
 
         // Settings first: applying them before this batch of events means the events are handled
         // under the config the user has already asked for, never under the one they just replaced.
@@ -912,9 +1176,11 @@ int main(int argc, char **argv) {
         }
         if (command == CONTROL_RELOAD) {
             struct config running = {
-                .home_as_back = s.home_as_back,
-                .combo_hold_kill_app = s.combo_hold_kill_app,
-                .virtual_mouse = s.virtual_mouse,
+                .home_single_action = s.home_single_action,
+                .home_double_action = s.home_double_action,
+                .home_hold_action = s.home_hold_action,
+                .select_start_hold_action = s.select_start_hold_action,
+                .select_r3_hold_action = s.select_r3_hold_action,
                 .generation = s.config_generation,
             };
             struct config next = running;
@@ -943,13 +1209,15 @@ int main(int argc, char **argv) {
         }
 
         if (!(fds[0].revents & POLLIN)) {
-            maybe_kill_combo_on_timeout(&s);
+            maybe_trigger_home_hold(&s);
+            maybe_finish_home_single(&s);
+            maybe_trigger_select_r3_hold(&s);
+            maybe_trigger_select_start_hold(&s);
             continue;
         }
 
-        // Drain every event the source has queued in one read(). The mode is decided once per
-        // batch (maybe_toggle_mouse_mode above); a batch spans microseconds, far below the 500ms
-        // toggle hold, so processing it under a single mode matches the old event-at-a-time loop.
+        // Drain every event the source has queued in one read(). A batch spans microseconds, far
+        // below either hold threshold.
         struct input_event events[EVENT_BATCH_SIZE];
         ssize_t bytes_read = read(s.source_fd, events, sizeof(events));
         if (bytes_read == 0) {
@@ -968,6 +1236,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        update_recents_mode(&s);
         int fatal_write_error = 0;
         for (size_t i = 0; i < event_count; i++) {
             struct input_event *event = &events[i];
@@ -978,16 +1247,23 @@ int main(int argc, char **argv) {
                 continue;
             }
 
-            // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
-            if (event->type == EV_KEY) {
-                update_combo_tracking(&s, event);
-            }
-
-            if (handle_home_as_back(&s, event)) {
+            if (handle_home_gestures(&s, event)) {
                 continue;
             }
 
-            handle_kill_combo_event(&s, event);
+            if (s.recents_active) {
+                handle_recents_event(&s, event);
+                continue;
+            }
+
+            // Track Select/Start/R3 for both combos, regardless of which feature is enabled.
+            if (event->type == EV_KEY) {
+                maybe_trigger_select_r3_hold(&s);
+                maybe_trigger_select_start_hold(&s);
+                update_combo_tracking(&s, event);
+                maybe_trigger_select_r3_hold(&s);
+                maybe_trigger_select_start_hold(&s);
+            }
 
             if (s.mouse.mode) {
                 // The pointer reports back what it cannot do itself. R1 asks for the notification
@@ -1010,6 +1286,8 @@ int main(int argc, char **argv) {
         if (fatal_write_error) {
             break;
         }
+        maybe_trigger_home_hold(&s);
+        maybe_finish_home_single(&s);
     }
 
     // Restore the hidden nodes FIRST — highest-priority cleanup, so a KILL escalation racing this
@@ -1030,6 +1308,11 @@ int main(int argc, char **argv) {
     if (ioctl(s.source_fd, EVIOCGRAB, 0) < 0) {
         fprintf(stderr, "Failed to release source %s: %s\n", source_path, strerror(errno));
     }
+
+    // A disconnected evdev source cannot send the releases for whatever was held when it vanished.
+    // Flush the state we actually forwarded before closing the target, otherwise Android keeps the
+    // last key/axis values and applies them again when the source reconnects.
+    release_target_holds(&s);
 
     // Shut mouse mode down the same way the user's own toggle does. Destroying the pointer device
     // is not enough on its own: Android goes on drawing the cursor until it fades, so stopping the

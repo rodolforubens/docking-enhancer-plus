@@ -18,6 +18,17 @@
 // malformed config can never walk us off the end of the table.
 #define MAX_BINDINGS 64
 
+// Stable wire values shared with GestureAction.nativeCode in the Android domain module.
+enum mirror_action {
+    ACTION_NONE = 0,
+    ACTION_HOME = 1,
+    ACTION_BACK = 2,
+    ACTION_RECENTS = 3,
+    ACTION_CLOSE_APP = 4,
+    ACTION_TOGGLE_VIRTUAL_MOUSE = 5,
+    ACTION_SLEEP = 6,
+};
+
 /*
  * What one end of a binding refers to.
  *
@@ -44,9 +55,11 @@ struct binding {
 };
 
 struct config {
-    int home_as_back;
-    int combo_hold_kill_app;
-    int virtual_mouse;
+    int home_single_action;
+    int home_double_action;
+    int home_hold_action;
+    int select_start_hold_action;
+    int select_r3_hold_action;
     long long generation;
 
     struct binding bindings[MAX_BINDINGS];

@@ -27,10 +27,8 @@ object MirrorStateStore {
         _snapshot.value = Snapshot(devices, status)
     }
 
-    // Whether the UI is currently on-screen. The supervisor skips its one privileged PServer call
-    // per tick (the controller enumeration) when undocked AND the UI is hidden, since nobody reads
-    // the device list then and the undocked auto-mirror decision ignores it — so a pocketed handheld
-    // stops spawning a pserver subprocess every idle tick.
+    // Whether the UI is currently on-screen. When activation requires a display, the supervisor can
+    // skip controller enumeration while undocked and hidden. Controller-only mode keeps watching.
     @Volatile
     var uiVisible: Boolean = false
         private set
@@ -57,6 +55,14 @@ object MirrorStateStore {
                 pendingWake = true
                 tickMonitor.notifyAll()
             }
+        }
+    }
+
+    /** Wake the supervisor after a setting changes the conditions it should currently observe. */
+    fun requestTick() {
+        synchronized(tickMonitor) {
+            pendingWake = true
+            tickMonitor.notifyAll()
         }
     }
 

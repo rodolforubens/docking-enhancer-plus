@@ -10,9 +10,13 @@ import com.odininputmirror.BuildConfig
 import com.odininputmirror.InputMirrorSupervisorService
 import com.odininputmirror.MirrorStateStore
 import com.odininputmirror.data.InputMirrorGraph
+import com.odininputmirror.domain.model.AutoMirrorTrigger
+import com.odininputmirror.domain.model.ControllerGesture
 import com.odininputmirror.domain.model.ControllerDevice
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.model.MappingKey
 import com.odininputmirror.domain.model.MirrorStatus
+import com.odininputmirror.domain.model.findControllerByGuid
 import com.odininputmirror.domain.model.findSavedControllerDevice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,12 +34,17 @@ data class MirrorUiState(
     val loading: Boolean = true,
     val busy: Boolean = false,
     val message: String = "",
-    val homeAsBack: Boolean = false,
-    val comboHoldKillApp: Boolean = false,
+    val homeSinglePressAction: GestureAction = GestureAction.HOME,
+    val homeDoublePressAction: GestureAction = GestureAction.BACK,
+    val homeHoldAction: GestureAction = GestureAction.RECENTS,
+    val selectStartHoldAction: GestureAction = GestureAction.CLOSE_APP,
+    val selectR3HoldAction: GestureAction = GestureAction.TOGGLE_VIRTUAL_MOUSE,
     val autoMirrorEnabled: Boolean = true,
+    val autoMirrorTrigger: AutoMirrorTrigger = AutoMirrorTrigger.CONTROLLER_AND_DISPLAY,
     val restartWaiting: Boolean = false,
     val docked: Boolean = false,
     val manualInternalGuid: String? = null,
+    val manualExternalGuid: String? = null,
     val unsupported: Boolean = false,
     // How many controls the external controller has captured, for the card. Null when it has no
     // identity to key a mapping on.
@@ -45,13 +54,28 @@ data class MirrorUiState(
     // The service is published but never answers (Odin 2 Mini). Distinct from absent, because
     // telling that owner their device "doesn't have it" would be flatly wrong.
     val serviceUnresponsive: Boolean = false,
-    val virtualMouse: Boolean = false,
 ) {
     // On a recognised handheld (e.g. Odin) the native layer flags the internal controller by
     // hardware signature and locks it. Otherwise the internal defaults to the first detected
     // controller and the user can re-pick it manually.
     val hasKnownInternalProfile: Boolean
         get() = devices.any { it.isKnownInternal }
+
+    fun actionFor(gesture: ControllerGesture): GestureAction = when (gesture) {
+        ControllerGesture.HOME_SINGLE_PRESS -> homeSinglePressAction
+        ControllerGesture.HOME_DOUBLE_PRESS -> homeDoublePressAction
+        ControllerGesture.HOME_HOLD -> homeHoldAction
+        ControllerGesture.SELECT_START_HOLD -> selectStartHoldAction
+        ControllerGesture.SELECT_R3_HOLD -> selectR3HoldAction
+    }
+
+    fun withAction(gesture: ControllerGesture, action: GestureAction): MirrorUiState = when (gesture) {
+        ControllerGesture.HOME_SINGLE_PRESS -> copy(homeSinglePressAction = action)
+        ControllerGesture.HOME_DOUBLE_PRESS -> copy(homeDoublePressAction = action)
+        ControllerGesture.HOME_HOLD -> copy(homeHoldAction = action)
+        ControllerGesture.SELECT_START_HOLD -> copy(selectStartHoldAction = action)
+        ControllerGesture.SELECT_R3_HOLD -> copy(selectR3HoldAction = action)
+    }
 }
 
 class MirrorViewModel(private val appContext: Context) : ViewModel() {
@@ -149,14 +173,28 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
 
     private fun applyStatus(status: MirrorStatus, available: List<ControllerDevice>) {
         val autoLocal = available.firstOrNull { it.isInternal }
-        val autoExternal = available.firstOrNull { !it.isInternal }
+        val externalCandidates = available.filter { device ->
+            !device.isInternal && !device.isSamePhysicalControllerAs(autoLocal)
+        }
+        val autoExternal = if (status.manualExternalGuid == null) {
+            externalCandidates.firstOrNull()
+        } else {
+            externalCandidates.findControllerByGuid(status.manualExternalGuid)
+        }
         val savedExternalIsLocal =
             autoLocal != null && savedIdentityMatches(status.source, status.sourceGuid, autoLocal)
 
         val localDevice = autoLocal
             ?: deviceFromSavedIdentity(status.target, status.targetGuid, available, "Saved built-in controller")
         val externalDevice = autoExternal
-            ?: if (savedExternalIsLocal) {
+            ?: if (status.manualExternalGuid != null) {
+                deviceFromSavedIdentity(
+                    path = null,
+                    guid = status.manualExternalGuid,
+                    devices = available,
+                    fallbackName = "Waiting for selected external controller",
+                )
+            } else if (savedExternalIsLocal) {
                 null
             } else {
                 deviceFromSavedIdentity(status.source, status.sourceGuid, available, "Waiting for external controller")
@@ -168,13 +206,17 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
                 localDevice = localDevice,
                 externalDevice = externalDevice,
                 enabled = status.running,
-                homeAsBack = status.homeAsBack,
-                comboHoldKillApp = status.comboHoldKillApp,
-                virtualMouse = status.virtualMouse,
+                homeSinglePressAction = status.homeSinglePressAction,
+                homeDoublePressAction = status.homeDoublePressAction,
+                homeHoldAction = status.homeHoldAction,
+                selectStartHoldAction = status.selectStartHoldAction,
+                selectR3HoldAction = status.selectR3HoldAction,
                 autoMirrorEnabled = status.autoMirrorEnabled,
+                autoMirrorTrigger = status.autoMirrorTrigger,
                 restartWaiting = status.expectedRunning && !status.running,
                 docked = status.docked,
                 manualInternalGuid = status.manualInternalGuid,
+                manualExternalGuid = status.manualExternalGuid,
                 // Database defaults deliberately do not count: the green border and CUSTOM MAPPING
                 // badge mean "the user made this", and a pad that merely matched its profile would
                 // otherwise wear them out of the box.
@@ -214,30 +256,20 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
-    // Option toggles only persist the setting; if the mirror is running with different flags the
-    // supervisor notices (started* snapshot vs current settings) and restarts it automatically.
-    fun toggleHomeAsBack(nextValue: Boolean) {
+    // Action assignments are persisted immediately; the supervisor pushes the new generation to a
+    // running daemon through its control fifo, so changing a dropdown never drops the controller.
+    fun selectGestureAction(gesture: ControllerGesture, action: GestureAction) {
         val current = _state.value
-        if (current.busy) return
-        _state.update { it.copy(homeAsBack = nextValue) }
+        if (current.busy || current.actionFor(gesture) == action) return
+        val previous = current.actionFor(gesture)
+        _state.update { it.withAction(gesture, action) }
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { graph.setHomeAsBackEnabled(nextValue) }
+                withContext(Dispatchers.IO) { graph.setGestureAction(gesture, action) }
             } catch (error: Exception) {
-                _state.update { it.copy(homeAsBack = !nextValue, message = error.message ?: error.toString()) }
-            }
-        }
-    }
-
-    fun toggleComboHoldKillApp(nextValue: Boolean) {
-        val current = _state.value
-        if (current.busy) return
-        _state.update { it.copy(comboHoldKillApp = nextValue) }
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) { graph.setComboHoldKillAppEnabled(nextValue) }
-            } catch (error: Exception) {
-                _state.update { it.copy(comboHoldKillApp = !nextValue, message = error.message ?: error.toString()) }
+                _state.update {
+                    it.withAction(gesture, previous).copy(message = error.message ?: error.toString())
+                }
             }
         }
     }
@@ -271,6 +303,30 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
+    fun selectAutoMirrorTrigger(trigger: AutoMirrorTrigger) {
+        val current = _state.value
+        if (current.busy || current.autoMirrorTrigger == trigger) return
+        _state.update { it.copy(busy = true, autoMirrorTrigger = trigger) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { graph.setAutoMirrorTrigger(trigger) }
+                startSupervisor()
+                _state.update {
+                    it.copy(message = "Automatic start condition updated.")
+                }
+            } catch (error: Exception) {
+                _state.update {
+                    it.copy(
+                        autoMirrorTrigger = current.autoMirrorTrigger,
+                        message = error.message ?: error.toString(),
+                    )
+                }
+            } finally {
+                _state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
     fun selectInternalController(guid: String?) {
         if (_state.value.busy) return
         _state.update { it.copy(busy = true) }
@@ -287,15 +343,25 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
         }
     }
 
-    fun toggleVirtualMouse(nextValue: Boolean) {
+    fun selectExternalController(guid: String?) {
         val current = _state.value
         if (current.busy) return
-        _state.update { it.copy(virtualMouse = nextValue) }
+        _state.update { it.copy(busy = true) }
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { graph.setVirtualMouseEnabled(nextValue) }
+                withContext(Dispatchers.IO) {
+                    graph.setManualExternalController(guid)
+                    // A running daemon owns the old source fd. Stop it after persisting the new pick;
+                    // the supervisor will start a fresh mirror with the selected controller.
+                    if (current.enabled) runCatching { graph.stopMirror() }
+                }
+                _state.update { it.copy(manualExternalGuid = guid) }
+                startSupervisor()
+                refresh()
             } catch (error: Exception) {
-                _state.update { it.copy(virtualMouse = !nextValue, message = error.message ?: error.toString()) }
+                _state.update { it.copy(message = error.message ?: error.toString()) }
+            } finally {
+                _state.update { it.copy(busy = false) }
             }
         }
     }
@@ -312,7 +378,11 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
     private fun buildStatusMessage(status: MirrorStatus, devices: List<ControllerDevice>): String = when {
         status.running -> "Dock mirror active."
         !status.autoMirrorEnabled -> "Automatic dock mirror is disabled."
+        status.autoMirrorTrigger.requiresExternalDisplay && !status.docked -> "Waiting for an external display."
         devices.none { it.isInternal } -> "Waiting for the built-in controller."
+        status.manualExternalGuid != null &&
+            devices.filter { !it.isInternal }.findControllerByGuid(status.manualExternalGuid) == null ->
+            "Waiting for the selected external controller."
         devices.none { !it.isInternal } -> "Waiting for an external controller."
         status.expectedRunning -> "Controller detected. Mirror will start automatically."
         else -> "Automatic dock mirror is ready."
@@ -336,6 +406,9 @@ class MirrorViewModel(private val appContext: Context) : ViewModel() {
             controllerNumber = 0,
         )
     }
+
+    private fun ControllerDevice.isSamePhysicalControllerAs(other: ControllerDevice?): Boolean =
+        other != null && controllerNumber > 0 && controllerNumber == other.controllerNumber
 
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {

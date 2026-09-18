@@ -20,12 +20,16 @@ class GetMirrorStatusUseCase(
             target = settings.target,
             sourceGuid = settings.sourceGuid,
             targetGuid = settings.targetGuid,
-            homeAsBack = settings.homeAsBack,
-            comboHoldKillApp = settings.comboHoldKillApp,
-            virtualMouse = settings.virtualMouse,
+            homeSinglePressAction = settings.homeSinglePressAction,
+            homeDoublePressAction = settings.homeDoublePressAction,
+            homeHoldAction = settings.homeHoldAction,
+            selectStartHoldAction = settings.selectStartHoldAction,
+            selectR3HoldAction = settings.selectR3HoldAction,
             autoMirrorEnabled = settings.autoMirrorEnabled,
+            autoMirrorTrigger = settings.autoMirrorTrigger,
             docked = dockStateRepository.isDockActive(),
             manualInternalGuid = settings.manualInternalGuid,
+            manualExternalGuid = settings.manualExternalGuid,
         )
     }
 }

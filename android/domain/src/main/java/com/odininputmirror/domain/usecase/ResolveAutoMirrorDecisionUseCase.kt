@@ -3,6 +3,7 @@ package com.odininputmirror.domain.usecase
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
+import com.odininputmirror.domain.model.findControllerByGuid
 
 class ResolveAutoMirrorDecisionUseCase {
     operator fun invoke(
@@ -15,13 +16,18 @@ class ResolveAutoMirrorDecisionUseCase {
         // said yet (it has only just started) or cannot say (a daemon predating the ack).
         appliedGeneration: Long? = null,
     ): AutoMirrorDecision {
-        if (!dockActive) {
+        if (settings.autoMirrorTrigger.requiresExternalDisplay && !dockActive) {
             return AutoMirrorDecision.StopForDock
         }
 
         val local = devices.firstOrNull { it.isInternal }
             ?: return AutoMirrorDecision.WaitingForInternalController
-        val external = devices.firstOrNull { !it.isInternal && !it.isSamePhysicalControllerAs(local) }
+        val externalCandidates = devices.filter { !it.isInternal && !it.isSamePhysicalControllerAs(local) }
+        val external = if (settings.manualExternalGuid == null) {
+            externalCandidates.firstOrNull()
+        } else {
+            externalCandidates.findControllerByGuid(settings.manualExternalGuid)
+        }
             ?: return AutoMirrorDecision.WaitingForExternalController
 
         if (local.path == external.path) {
@@ -34,9 +40,11 @@ class ResolveAutoMirrorDecisionUseCase {
             target = local.path,
             sourceGuid = external.guid,
             targetGuid = local.guid,
-            homeAsBack = settings.homeAsBack,
-            comboHoldKillApp = settings.comboHoldKillApp,
-            virtualMouse = settings.virtualMouse,
+            homeSinglePressAction = settings.homeSinglePressAction,
+            homeDoublePressAction = settings.homeDoublePressAction,
+            homeHoldAction = settings.homeHoldAction,
+            selectStartHoldAction = settings.selectStartHoldAction,
+            selectR3HoldAction = settings.selectR3HoldAction,
             hideNodes = listOfNotNull(external.hideNodePath),
         )
 

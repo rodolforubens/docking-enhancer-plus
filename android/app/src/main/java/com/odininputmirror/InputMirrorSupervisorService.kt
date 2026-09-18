@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
@@ -12,6 +13,7 @@ import android.util.Log
 import com.odininputmirror.data.InputMirrorGraph
 import com.odininputmirror.domain.model.ControllerDevice
 import com.odininputmirror.domain.model.ControllerMapping
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.model.MirrorStatus
@@ -44,6 +46,7 @@ class InputMirrorSupervisorService : Service() {
             running = true
             worker = Thread({ superviseMirror() }, "input-mirror-supervisor").also { it.start() }
         }
+        MirrorStateStore.requestTick()
         return START_STICKY
     }
 
@@ -83,19 +86,33 @@ class InputMirrorSupervisorService : Service() {
 
         var nextRestartAllowedAt = 0L
         var nextStartRetryAllowedAt = 0L
+        var nextAccessibilityAttemptAt = 0L
         var sleepMs = SUPERVISOR_INTERVAL_MS
 
         while (running) {
             try {
                 val now = System.currentTimeMillis()
                 val settings = graph.settingsRepository.getSettings()
+                if (settings.usesRecentsAction() && now >= nextAccessibilityAttemptAt) {
+                    val component = ComponentName(
+                        this,
+                        RecentsAccessibilityService::class.java,
+                    ).flattenToString()
+                    val enabled = runCatching {
+                        graph.ensureAccessibilityServiceEnabled(component)
+                    }.getOrDefault(false)
+                    nextAccessibilityAttemptAt = if (enabled) {
+                        Long.MAX_VALUE
+                    } else {
+                        now + ACCESSIBILITY_RETRY_BACKOFF_MS
+                    }
+                }
                 val dockActive = graph.dockStateRepository.isDockActive()
-                // Enumerate controllers only when the result is actually consumed: docked (the
-                // auto-mirror decision below reads the list) or the UI is on-screen (it renders the
-                // list for setup). Undocked with the UI hidden, this is the one privileged PServer
-                // call per tick that nobody reads — skip it so a pocketed handheld isn't spawning a
-                // subprocess every idle tick. The undocked decision uses an empty list regardless.
-                val allDevices = if (dockActive || MirrorStateStore.uiVisible) {
+                // Controller-only activation has to keep watching while no display is attached. The
+                // stricter mode can skip this privileged enumeration while undocked and off-screen.
+                val watchControllers = !settings.autoMirrorTrigger.requiresExternalDisplay ||
+                    dockActive || MirrorStateStore.uiVisible
+                val allDevices = if (watchControllers) {
                     graph.inputDeviceRepository.getConnectedControllers()
                 } else {
                     emptyList()
@@ -118,7 +135,11 @@ class InputMirrorSupervisorService : Service() {
                     MirrorStateStore.awaitNextTick(sleepMs)
                     continue
                 }
-                val devices = if (dockActive) allDevices else emptyList()
+                val devices = if (dockActive || !settings.autoMirrorTrigger.requiresExternalDisplay) {
+                    allDevices
+                } else {
+                    emptyList()
+                }
                 val decision = graph.resolveAutoMirrorDecision(
                     dockActive = dockActive,
                     devices = devices,
@@ -234,12 +255,16 @@ class InputMirrorSupervisorService : Service() {
                 target = settings.target,
                 sourceGuid = settings.sourceGuid,
                 targetGuid = settings.targetGuid,
-                homeAsBack = settings.homeAsBack,
-                comboHoldKillApp = settings.comboHoldKillApp,
-                virtualMouse = settings.virtualMouse,
+                homeSinglePressAction = settings.homeSinglePressAction,
+                homeDoublePressAction = settings.homeDoublePressAction,
+                homeHoldAction = settings.homeHoldAction,
+                selectStartHoldAction = settings.selectStartHoldAction,
+                selectR3HoldAction = settings.selectR3HoldAction,
                 autoMirrorEnabled = settings.autoMirrorEnabled,
+                autoMirrorTrigger = settings.autoMirrorTrigger,
                 docked = dockActive,
                 manualInternalGuid = settings.manualInternalGuid,
+                manualExternalGuid = settings.manualExternalGuid,
             ),
         )
     }
@@ -270,6 +295,13 @@ class InputMirrorSupervisorService : Service() {
             false
         }
     }
+
+    private fun MirrorSettings.usesRecentsAction(): Boolean =
+        homeSinglePressAction == GestureAction.RECENTS ||
+            homeDoublePressAction == GestureAction.RECENTS ||
+            homeHoldAction == GestureAction.RECENTS ||
+            selectStartHoldAction == GestureAction.RECENTS ||
+            selectR3HoldAction == GestureAction.RECENTS
 
     private fun updateSupervisorState(state: SupervisorState) {
         // An interrupt does not abort a binder transact already in flight, so a tick that was mid-call
@@ -344,5 +376,6 @@ class InputMirrorSupervisorService : Service() {
         private const val SUPERVISOR_ERROR_INTERVAL_MS = 15000L
         private const val RESTART_THROTTLE_MS = 10000L
         private const val START_RETRY_BACKOFF_MS = 60000L
+        private const val ACCESSIBILITY_RETRY_BACKOFF_MS = 60000L
     }
 }

@@ -45,9 +45,13 @@ static const int KEYS[] = {
     BTN_TL, BTN_TR, BTN_TL2, BTN_TR2,
     BTN_SELECT, BTN_START, BTN_MODE,
     BTN_THUMBL, BTN_THUMBR,
+    BTN_DPAD_LEFT, BTN_DPAD_RIGHT,
 };
 
-static const int AXES[] = { ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ };
+static const int AXES[] = {
+    ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ,
+    ABS_HAT0X, ABS_HAT0Y,
+};
 
 static int emit(int fd, unsigned short type, unsigned short code, int value) {
     struct input_event ev;

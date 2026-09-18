@@ -44,6 +44,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.odininputmirror.MainActivity
+import com.odininputmirror.domain.model.AutoMirrorTrigger
+import com.odininputmirror.domain.model.ControllerGesture
 import com.odininputmirror.ui.theme.Palette
 import kotlinx.coroutines.delay
 
@@ -75,7 +77,10 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
         )
         return
     }
-    var pickerOpen by remember { mutableStateOf(false) }
+    var internalPickerOpen by remember { mutableStateOf(false) }
+    var externalPickerOpen by remember { mutableStateOf(false) }
+    var triggerPickerOpen by remember { mutableStateOf(false) }
+    var actionPickerGesture by remember { mutableStateOf<ControllerGesture?>(null) }
     var screenHasFocus by remember { mutableStateOf(false) }
     // Initial gamepad focus prefers the first control (the Local Controller card) and falls back to
     // the always-present primary button for when the card isn't focusable (mirror on / busy).
@@ -187,7 +192,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             Text("Automatic Dock Mirror", color = Palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Controllers are selected automatically while dock mode is active.",
+                "Controllers can be detected automatically or selected manually.",
                 color = Palette.textSecondary,
                 fontSize = 14.sp,
             )
@@ -210,15 +215,19 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
                         else -> "Tap to select internal"
                     },
                     enabled = !state.autoMirrorEnabled,
-                    onClick = if (state.busy || state.autoMirrorEnabled) null else ({ pickerOpen = true }),
+                    onClick = if (state.busy || state.autoMirrorEnabled) null else ({ internalPickerOpen = true }),
                 )
                 DeviceCard(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                     title = "External Controller",
                     device = state.externalDevice,
-                    hint = "First connected controller",
-                    enabled = true,
-                    onClick = null,
+                    hint = if (state.manualExternalGuid == null) {
+                        "Automatic · tap to select"
+                    } else {
+                        "Selected manually · tap to change"
+                    },
+                    enabled = !state.busy,
+                    onClick = if (state.busy) null else ({ externalPickerOpen = true }),
                     hasCustomMapping = (state.mappedControlCount ?: 0) > 0,
                     hasSeededMapping = state.hasSeededMapping,
                     // Only offered once the controller has an identity to save a mapping against.
@@ -231,32 +240,36 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             }
 
             Spacer(Modifier.height(20.dp))
-            SettingRow(
-                title = "Home as Back",
-                description = "External controller Home button acts as Back",
-                checked = state.homeAsBack,
+            ChoiceSettingRow(
+                title = "Automatic start condition",
+                description = when (state.autoMirrorTrigger) {
+                    AutoMirrorTrigger.CONTROLLER_CONNECTED ->
+                        "Start whenever the selected external controller is available"
+                    AutoMirrorTrigger.CONTROLLER_AND_DISPLAY ->
+                        "Require both the controller and a USB-C/HDMI display"
+                },
+                value = when (state.autoMirrorTrigger) {
+                    AutoMirrorTrigger.CONTROLLER_CONNECTED -> "Controller"
+                    AutoMirrorTrigger.CONTROLLER_AND_DISPLAY -> "Controller + display"
+                },
                 enabled = !state.busy,
-                onCheckedChange = { viewModel.toggleHomeAsBack(it) },
+                onClick = { triggerPickerOpen = true },
             )
+            Spacer(Modifier.height(20.dp))
+            Text("Controller actions", color = Palette.textPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(12.dp))
-            SettingRow(
-                title = "Select + Start closes app",
-                description = "Hold Select and Start for 3 seconds to close the current app",
-                checked = state.comboHoldKillApp,
-                enabled = !state.busy,
-                onCheckedChange = { viewModel.toggleComboHoldKillApp(it) },
-            )
-
-            Spacer(Modifier.height(12.dp))
-            SettingRow(
-                title = "Virtual mouse",
-                description = "Turn the external controller into a mouse. Hold Select + right-stick (R3) to switch in or out. " +
-                    "Left stick moves the pointer, right stick scrolls, A left-clicks, B right-clicks, " +
-                    "R1 opens/closes the notification shade.",
-                checked = state.virtualMouse,
-                enabled = !state.busy,
-                onCheckedChange = { viewModel.toggleVirtualMouse(it) },
-            )
+            ControllerGesture.entries.forEach { gesture ->
+                ChoiceSettingRow(
+                    title = gesture.title(),
+                    description = gesture.description(),
+                    value = state.actionFor(gesture).label(),
+                    enabled = !state.busy,
+                    onClick = { actionPickerGesture = gesture },
+                )
+                if (gesture != ControllerGesture.entries.last()) {
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
 
             Spacer(Modifier.height(16.dp))
             Text(
@@ -269,7 +282,12 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             if (!state.loading && !state.enabled && state.autoMirrorEnabled) {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "The mirror starts automatically when the internal controller and an external controller are available.",
+                    when (state.autoMirrorTrigger) {
+                        AutoMirrorTrigger.CONTROLLER_CONNECTED ->
+                            "The mirror starts when the internal and selected external controllers are available."
+                        AutoMirrorTrigger.CONTROLLER_AND_DISPLAY ->
+                            "The mirror starts when both controllers and an external display are available."
+                    },
                     color = Palette.textMuted,
                     fontSize = 12.sp,
                 )
@@ -291,7 +309,7 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
         }
     }
 
-    if (pickerOpen) {
+    if (internalPickerOpen) {
         InternalControllerPicker(
             // Drop whatever is currently acting as the external pad: this list answers "which one is
             // built into the handheld?", and the mirror source is never that. Matching on path keeps
@@ -300,14 +318,68 @@ fun MirrorScreen(viewModel: MirrorViewModel) {
             devices = state.devices.filter { it.path != state.externalDevice?.path },
             selectedGuid = state.manualInternalGuid,
             onSelect = { guid ->
-                pickerOpen = false
+                internalPickerOpen = false
                 viewModel.selectInternalController(guid)
             },
-            onClose = { pickerOpen = false },
+            onClose = { internalPickerOpen = false },
+        )
+    }
+
+    if (externalPickerOpen) {
+        ExternalControllerPicker(
+            devices = state.devices.filter { device ->
+                !device.isInternal &&
+                    (device.controllerNumber <= 0 || device.controllerNumber != state.localDevice?.controllerNumber)
+            },
+            selectedGuid = state.manualExternalGuid,
+            onSelect = { guid ->
+                externalPickerOpen = false
+                viewModel.selectExternalController(guid)
+            },
+            onClose = { externalPickerOpen = false },
+        )
+    }
+
+    if (triggerPickerOpen) {
+        AutoMirrorTriggerPicker(
+            selected = state.autoMirrorTrigger,
+            onSelect = { trigger ->
+                triggerPickerOpen = false
+                viewModel.selectAutoMirrorTrigger(trigger)
+            },
+            onClose = { triggerPickerOpen = false },
+        )
+    }
+
+    actionPickerGesture?.let { gesture ->
+        GestureActionPicker(
+            title = gesture.title(),
+            selected = state.actionFor(gesture),
+            onSelect = { action ->
+                actionPickerGesture = null
+                viewModel.selectGestureAction(gesture, action)
+            },
+            onClose = { actionPickerGesture = null },
         )
     }
 
     if (state.unsupported) {
         UnsupportedDeviceDialog(serviceUnresponsive = state.serviceUnresponsive)
     }
+}
+
+private fun ControllerGesture.title(): String = when (this) {
+    ControllerGesture.HOME_SINGLE_PRESS -> "Single press Home action"
+    ControllerGesture.HOME_DOUBLE_PRESS -> "Double press Home action"
+    ControllerGesture.HOME_HOLD -> "Hold Home action"
+    ControllerGesture.SELECT_START_HOLD -> "Select + Start hold action"
+    ControllerGesture.SELECT_R3_HOLD -> "Select + R3 hold action"
+}
+
+private fun ControllerGesture.description(): String = when (this) {
+    ControllerGesture.HOME_SINGLE_PRESS -> "Action after one quick Home press"
+    ControllerGesture.HOME_DOUBLE_PRESS -> "Action after two quick Home presses"
+    ControllerGesture.HOME_HOLD -> "Action after holding Home for 0.5 seconds"
+    ControllerGesture.SELECT_START_HOLD -> "Action after holding Select + Start for 3 seconds"
+    ControllerGesture.SELECT_R3_HOLD -> "Action after holding Select + R3 for 0.5 seconds"
 }

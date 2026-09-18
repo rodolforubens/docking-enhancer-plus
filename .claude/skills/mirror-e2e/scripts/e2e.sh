@@ -49,7 +49,9 @@ stop_mirror() {
 # Start the daemon as root, detached. Root is test scaffolding only — the product itself reaches the
 # same binary through PServerBinder with no root at all.
 start_mirror() {
-    su -c "$MIRROR $* > $LOG 2>&1 &"
+    # TMP comes first so a test can replace a system command with a recorder. Until such a file is
+    # created the normal Android tools are found in /system/bin as usual.
+    su -c "PATH=$TMP:/system/bin:/system/xbin $MIRROR $* > $LOG 2>&1 &"
     i=0
     while [ -z "$(mirror_pid)" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
 }
@@ -79,6 +81,7 @@ mkfifo $SRCFIFO $DSTFIFO
 # Source keeps the Odin quirk vendor (0x2020): hide_node refuses anything else. The target takes the
 # Xbox product id so the daemon's Nintendo face-button swap stays off and forwarding is 1:1.
 $VPAD --name "E2E Source Pad" --vendor 0x2020 --product 0x0111 --path-file $TMP/src.path < $SRCFIFO &
+SRC_PAD_PID=$!
 exec 3> $SRCFIFO
 $VPAD --name "E2E Target Pad" --vendor 0x2020 --product 0x0112 --path-file $TMP/dst.path < $DSTFIFO &
 exec 4> $DSTFIFO
@@ -244,7 +247,7 @@ mkfifo $FIFO 2>/dev/null
 
 generation() { sed -n 's/^generation //p' $HEART 2>/dev/null; }
 write_config() {
-    printf '{ "generation": %s, "home_as_back": %s, "combo_hold_kill_app": false, "virtual_mouse": false }\n' \
+    printf '{ "generation": %s, "home_single_action": %s, "home_double_action": 0, "home_hold_action": 0, "select_start_hold_action": 0, "select_r3_hold_action": 0 }\n' \
         "$1" "$2" > $CFG.tmp
     mv $CFG.tmp $CFG
 }
@@ -259,7 +262,7 @@ press_source() { echo "key $1 1" >&3; echo "syn" >&3; echo "key $1 0" >&3; echo 
 # Un eje del pad de origen a un valor concreto. Los ejes van de -32768 a 32767 con reposo en 0.
 move_source() { echo "abs $1 $2" >&3; echo "syn" >&3; }
 
-write_config 1 false
+write_config 1 0
 start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --hidden-state-file $STATE --heartbeat-file $HEART
 PID_BEFORE=$(mirror_pid)
 if [ -z "$PID_BEFORE" ]; then
@@ -269,7 +272,7 @@ else
     G=$(generation)
     if [ "$G" = "1" ]; then ok "adopta la config del arranque"; else bad "no publico la generacion inicial [$G]"; fi
 
-    write_config 2 true
+    write_config 2 1
     poke
     sleep 1.5
     G=$(generation)
@@ -301,7 +304,7 @@ echo "=== T7: la captura reporta y no reenvia ==="
 CAPLOG=$TMP/capture.log
 rm -f $CAPLOG $CFG $FIFO
 mkfifo $FIFO 2>/dev/null
-write_config 1 false
+write_config 1 0
 
 start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --capture-file $CAPLOG --heartbeat-file $HEART
 if [ -z "$(mirror_pid)" ]; then
@@ -359,9 +362,11 @@ echo "=== T8: un mapeo en la config cambia el codigo reenviado ==="
 cat > $CFG.tmp <<'EOF'
 {
   "generation": 1,
-  "home_as_back": false,
-  "combo_hold_kill_app": false,
-  "virtual_mouse": false,
+  "home_single_action": 0,
+  "home_double_action": 0,
+  "home_hold_action": 0,
+  "select_start_hold_action": 0,
+  "select_r3_hold_action": 0,
   "mapping": { "bindings": [[0, 304, 0, 0, 307, 0]] }
 }
 EOF
@@ -403,9 +408,11 @@ echo "=== T9: media travesia de un eje llega como boton ==="
 cat > $CFG.tmp <<'EOF'
 {
   "generation": 1,
-  "home_as_back": false,
-  "combo_hold_kill_app": false,
-  "virtual_mouse": false,
+  "home_single_action": 0,
+  "home_double_action": 0,
+  "home_hold_action": 0,
+  "select_start_hold_action": 0,
+  "select_r3_hold_action": 0,
   "mapping": { "bindings": [[2, 2, 1, 0, 307, 0]] }
 }
 EOF
@@ -466,9 +473,11 @@ echo "=== T10: un boton llega como deflexion completa de un eje ==="
 cat > $CFG.tmp <<'EOF'
 {
   "generation": 1,
-  "home_as_back": false,
-  "combo_hold_kill_app": false,
-  "virtual_mouse": false,
+  "home_single_action": 0,
+  "home_double_action": 0,
+  "home_hold_action": 0,
+  "select_start_hold_action": 0,
+  "select_r3_hold_action": 0,
   "mapping": { "bindings": [[0, 304, 0, 2, 3, 1]] }
 }
 EOF
@@ -510,7 +519,7 @@ echo "=== T11: una captura abandonada expira sola ==="
 # porque es lo que se esta probando; no hay forma honesta de acelerarlo.
 rm -f $CFG $FIFO
 mkfifo $FIFO 2>/dev/null
-write_config 1 false
+write_config 1 0
 
 start_mirror "$SRC" "$DST" --config-file $CFG --control-fifo $FIFO --capture-file $TMP/t11.cap --heartbeat-file $HEART
 if [ -z "$(mirror_pid)" ]; then
@@ -579,7 +588,7 @@ hold_mouse_combo() {
     sleep 0.4
 }
 
-start_mirror "$SRC" "$DST" --virtual-mouse --heartbeat-file $HEART
+start_mirror "$SRC" "$DST" --select-r3-hold-action 5 --heartbeat-file $HEART
 if [ -z "$(mirror_pid)" ]; then
     bad "el daemon arranco en modo raton"
 else
@@ -659,12 +668,194 @@ else
 fi
 rm -f $TMP/t12.mouse $TMP/t12.dst $TMP/t12.back
 
+# --- T13: Home tap / hold / double-tap -------------------------------------------------------------
+
+echo ""
+echo "=== T13: Home corto va al inicio; doble vuelve; sostenido abre Recientes ==="
+
+HOME_ACTIONS=$TMP/home-actions
+cat > $TMP/input <<'EOF'
+#!/system/bin/sh
+echo "$*" >> /data/local/tmp/e2e/home-actions
+EOF
+chmod 755 $TMP/input
+rm -f $HOME_ACTIONS
+
+start_mirror "$SRC" "$DST" --home-single-action 1 --home-double-action 2 --home-hold-action 3 --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para probar Home"
+else
+    # BTN_MODE is 316 on the synthetic controller. A quick press owes Home only after the
+    # double-tap window closes.
+    echo "key 316 1" >&3; echo "syn" >&3
+    sleep 0.2
+    if [ -e $HOME_ACTIONS ]; then
+        bad "Home corto no actua antes de soltar"
+    else
+        ok "Home corto no actua antes de soltar"
+    fi
+    echo "key 316 0" >&3; echo "syn" >&3
+    sleep 0.2
+    if [ -e $HOME_ACTIONS ]; then
+        bad "Home corto espera la ventana de doble toque"
+    else
+        ok "Home corto espera la ventana de doble toque"
+    fi
+    sleep 0.4
+    expect_contains $HOME_ACTIONS "keyevent 3" "Home corto envia Home"
+    if grep -q "keyevent 4" $HOME_ACTIONS 2>/dev/null; then
+        bad "Home corto no envia Back"
+    else
+        ok "Home corto no envia Back"
+    fi
+
+    # A hold crosses 500ms and must open Recents before release.
+    rm -f $HOME_ACTIONS
+    echo "key 316 1" >&3; echo "syn" >&3
+    sleep 0.8
+    expect_contains $HOME_ACTIONS "keyevent 187" "Home sostenido abre Recientes durante la pulsacion"
+    echo "key 316 0" >&3; echo "syn" >&3
+    sleep 0.4
+    if grep -q "keyevent 4" $HOME_ACTIONS 2>/dev/null; then
+        bad "Home sostenido no envia Back al soltar"
+    else
+        ok "Home sostenido no envia Back al soltar"
+    fi
+
+    rm -f $HOME_ACTIONS
+    echo "key 316 1" >&3; echo "syn" >&3
+    echo "key 316 0" >&3; echo "syn" >&3
+    sleep 0.12
+    echo "key 316 1" >&3; echo "syn" >&3
+    echo "key 316 0" >&3; echo "syn" >&3
+    sleep 0.6
+
+    expect_contains $HOME_ACTIONS "keyevent 4" "doble Home envia Back"
+    if grep -qE "keyevent (3|187)" $HOME_ACTIONS 2>/dev/null; then
+        bad "doble Home no envia Home ni Recientes"
+    else
+        ok "doble Home no envia Home ni Recientes"
+    fi
+
+    stop_mirror
+fi
+
+# Sleep is another assignable action, not special Home handling. With no double-tap assignment the
+# single press fires as soon as Home is released; the fake input command keeps the device awake.
+rm -f $HOME_ACTIONS
+start_mirror "$SRC" "$DST" --home-single-action 6 --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para probar Sleep"
+else
+    echo "key 316 1" >&3; echo "syn" >&3
+    echo "key 316 0" >&3; echo "syn" >&3
+    sleep 0.3
+    expect_contains $HOME_ACTIONS "keyevent 223" "Sleep envia KEYCODE_SLEEP"
+    stop_mirror
+fi
+rm -f $TMP/input $HOME_ACTIONS
+
+# --- T14: Recents bypasses an app that consumes controller input ----------------------------------
+
+echo ""
+echo "=== T14: Recents recibe el control sin reenviarlo al app ==="
+
+RECENTS_STATE=$TMP/recents.state
+RECENTS_EVENTS=$TMP/recents.events
+rm -f $RECENTS_STATE $RECENTS_EVENTS $TMP/t14.target
+touch $RECENTS_EVENTS $RECENTS_STATE
+
+start_mirror "$SRC" "$DST" --recents-state-file $RECENTS_STATE --recents-events-file $RECENTS_EVENTS --heartbeat-file $HEART
+if [ -z "$(mirror_pid)" ]; then
+    bad "el daemon arranco para probar el desvio de Recents"
+else
+    getevent -lt "$DST" > $TMP/t14.target 2>&1 &
+    T14GE=$!
+    sleep 0.4
+
+    # Xbox pads commonly expose the D-pad as ABS_HAT0X; the button form is covered too.
+    echo "abs 16 -32768" >&3; echo "syn" >&3
+    echo "abs 16 0" >&3; echo "syn" >&3
+    echo "key 547 1" >&3; echo "syn" >&3
+    echo "key 547 0" >&3; echo "syn" >&3
+    press_source 304
+    press_source 308
+    sleep 0.5
+    kill $T14GE 2>/dev/null
+
+    expect_contains $RECENTS_EVENTS "left" "el HAT izquierdo llega al servicio de Recents"
+    expect_contains $RECENTS_EVENTS "right" "el D-pad derecho llega al servicio de Recents"
+    expect_contains $RECENTS_EVENTS "resume" "A llega como Resume"
+    expect_contains $RECENTS_EVENTS "close" "X llega como Close"
+    if grep -qE "BTN_GAMEPAD|BTN_WEST|ABS_HAT0X" $TMP/t14.target 2>/dev/null; then
+        bad "Recents no reenvia sus comandos al app capturador"
+    else
+        ok "Recents no reenvia sus comandos al app capturador"
+    fi
+
+    # Once overview closes, the very next source event follows the ordinary mirror path again.
+    rm -f $RECENTS_STATE
+    getevent -lt "$DST" > $TMP/t14.after 2>&1 &
+    T14AFTER=$!
+    sleep 0.3
+    press_source 304
+    sleep 0.4
+    kill $T14AFTER 2>/dev/null
+    expect_contains $TMP/t14.after "BTN_GAMEPAD" "al salir de Recents el pad vuelve al target"
+    stop_mirror
+fi
+rm -f $RECENTS_STATE $RECENTS_EVENTS $TMP/t14.target $TMP/t14.after
+
+# --- T15: source disconnect releases target state ------------------------------------------------
+
+echo ""
+echo "=== T15: desconectar el source libera botones y ejes del target ==="
+
+start_mirror "$SRC" "$DST" --heartbeat-file $HEART
+T15_MIRROR_PID=$(mirror_pid)
+if [ -z "$T15_MIRROR_PID" ]; then
+    bad "el daemon arranco para probar la desconexion"
+else
+    ok "el daemon arranco para probar la desconexion"
+
+    getevent -lt "$DST" > $TMP/t15.out 2>&1 &
+    T15GE=$!
+    sleep 0.4
+
+    # Leave both controls active, then destroy the source device without sending either release.
+    echo "key 304 1" >&3
+    echo "abs 0 24000" >&3
+    echo "syn" >&3
+    sleep 0.4
+fi
+
+echo "quit" >&3
+exec 3>&-
+wait "$SRC_PAD_PID" 2>/dev/null
+
+if [ -n "$T15_MIRROR_PID" ]; then
+    wait_for_gone "/proc/$T15_MIRROR_PID" 50
+    sleep 0.4
+    kill $T15GE 2>/dev/null
+
+    if [ -z "$(mirror_pid)" ]; then
+        ok "el daemon sale cuando desaparece el source"
+    else
+        bad "el daemon sigue vivo despues de desaparecer el source"
+        stop_mirror
+    fi
+    expect_contains $TMP/t15.out "BTN_GAMEPAD.*DOWN" "el boton estaba apretado antes de desconectar"
+    expect_contains $TMP/t15.out "BTN_GAMEPAD.*UP" "la desconexion suelta el boton en el target"
+    expect_contains $TMP/t15.out "ABS_X.*00005dc0" "el eje estaba desviado antes de desconectar"
+    expect_contains $TMP/t15.out "ABS_X.*00000000" "la desconexion devuelve el eje al centro"
+fi
+rm -f $TMP/t15.out
+
 # --- teardown ------------------------------------------------------------------------------------
 
 echo ""
 echo "=== teardown ==="
 stop_mirror
-exec 3>&-
 exec 4>&-
 sleep 0.5
 su -c "rm -rf $TMP $MIRROR" 2>/dev/null

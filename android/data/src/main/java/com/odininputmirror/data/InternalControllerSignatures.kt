@@ -19,9 +19,13 @@ internal data class InternalControllerSignature(
         vendorId in vendorIds && productId in productIds
 }
 
+internal const val ODIN_VENDOR_ID = 0x2020
+internal const val ODIN_NINTENDO_PRODUCT_ID = 0x0111
+internal const val ODIN_XBOX_PRODUCT_ID = 0x0112
+
 internal val ODIN_INTERNAL_CONTROLLER_SIGNATURE = InternalControllerSignature(
-    vendorIds = setOf(0x2020),
-    productIds = setOf(0x0111, 0x0112),
+    vendorIds = setOf(ODIN_VENDOR_ID),
+    productIds = setOf(ODIN_NINTENDO_PRODUCT_ID, ODIN_XBOX_PRODUCT_ID),
     hasVendorMirroringQuirk = true,
 )
 

@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Docking Enhancer</string>
+    <string name="recents_accessibility_label">Docking Enhancer Recents controls</string>
+    <string name="recents_accessibility_description">Focuses the current task in Recents and shows the controller button legend.</string>
 </resources>

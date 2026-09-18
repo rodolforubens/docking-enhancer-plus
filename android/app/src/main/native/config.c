@@ -46,22 +46,6 @@ static const char *json_value_of(const char *json, const char *key) {
     return at;
 }
 
-// Accepts true/false and 1/0; anything else leaves the value alone, so an unknown spelling degrades
-// to "keep what we had" instead of silently reading as off.
-static int json_bool(const char *json, const char *key, int fallback) {
-    const char *value = json_value_of(json, key);
-    if (value == NULL) {
-        return fallback;
-    }
-    if (strncmp(value, "true", 4) == 0 || *value == '1') {
-        return 1;
-    }
-    if (strncmp(value, "false", 5) == 0 || *value == '0') {
-        return 0;
-    }
-    return fallback;
-}
-
 static long long json_number(const char *json, const char *key, long long fallback) {
     const char *value = json_value_of(json, key);
     if (value == NULL) {
@@ -70,6 +54,11 @@ static long long json_number(const char *json, const char *key, long long fallba
     char *end = NULL;
     long long parsed = strtoll(value, &end, 10);
     return end == value ? fallback : parsed;
+}
+
+static int json_action(const char *json, const char *key, int fallback) {
+    long long value = json_number(json, key, fallback);
+    return value >= ACTION_NONE && value <= ACTION_SLEEP ? (int)value : fallback;
 }
 
 /*
@@ -203,9 +192,13 @@ int parse_config(const char *path, const struct config *current, struct config *
     }
 
     out->generation = generation;
-    out->home_as_back = json_bool(buffer, "home_as_back", current->home_as_back);
-    out->combo_hold_kill_app = json_bool(buffer, "combo_hold_kill_app", current->combo_hold_kill_app);
-    out->virtual_mouse = json_bool(buffer, "virtual_mouse", current->virtual_mouse);
+    out->home_single_action = json_action(buffer, "home_single_action", current->home_single_action);
+    out->home_double_action = json_action(buffer, "home_double_action", current->home_double_action);
+    out->home_hold_action = json_action(buffer, "home_hold_action", current->home_hold_action);
+    out->select_start_hold_action =
+        json_action(buffer, "select_start_hold_action", current->select_start_hold_action);
+    out->select_r3_hold_action =
+        json_action(buffer, "select_r3_hold_action", current->select_r3_hold_action);
     parse_mapping(buffer, out);
     return 0;
 }

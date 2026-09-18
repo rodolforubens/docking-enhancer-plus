@@ -1,8 +1,11 @@
 package com.odininputmirror.data
 
 import com.odininputmirror.domain.model.Binding
+import com.odininputmirror.domain.model.AutoMirrorTrigger
 import com.odininputmirror.domain.model.ControlRef
+import com.odininputmirror.domain.model.ControllerGesture
 import com.odininputmirror.domain.model.ControllerMapping
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.model.MirrorSettings
 import com.odininputmirror.domain.model.MirrorStartRequest
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
@@ -114,9 +117,6 @@ class RootMirrorProcessRepositoryTest {
             MirrorStartRequest(
                 source = "/dev/input/event9",
                 target = "/dev/input/event2",
-                homeAsBack = true,
-                comboHoldKillApp = true,
-                virtualMouse = true,
             )
         )
 
@@ -132,14 +132,18 @@ class RootMirrorProcessRepositoryTest {
         assertTrue(command.contains("[ \"\$3\" = '/dev/input/event2' ]"))
         assertTrue(command.contains("kill -TERM \$p"))
         assertTrue(command.contains("'/dev/input/event9' '/dev/input/event2'"))
-        assertTrue(command.contains(" --home-as-back"))
-        assertTrue(command.contains(" --combo-hold-kill-app"))
-        assertTrue(command.contains(" --virtual-mouse"))
+        assertTrue(command.contains(" --home-single-action 1"))
+        assertTrue(command.contains(" --home-double-action 2"))
+        assertTrue(command.contains(" --home-hold-action 3"))
+        assertTrue(command.contains(" --select-start-hold-action 4"))
+        assertTrue(command.contains(" --select-r3-hold-action 5"))
         assertTrue(command.contains("--pid-file '${files.pidFile.absolutePath}'"))
         assertTrue(command.contains("--heartbeat-file '${files.heartbeatFile.absolutePath}'"))
         assertTrue(command.contains("--hidden-state-file '${files.hiddenStateFile.absolutePath}'"))
         assertTrue(command.contains("--config-file '${files.configFile.absolutePath}'"))
         assertTrue(command.contains("--control-fifo '${files.controlFifo.absolutePath}'"))
+        assertTrue(command.contains("--recents-state-file '${files.recentsStateFile.absolutePath}'"))
+        assertTrue(command.contains("--recents-events-file '${files.recentsEventsFile.absolutePath}'"))
     }
 
     @Test
@@ -150,17 +154,16 @@ class RootMirrorProcessRepositoryTest {
             MirrorStartRequest(
                 source = "/dev/input/event9",
                 target = "/dev/input/event2",
-                homeAsBack = true,
-                comboHoldKillApp = false,
-                virtualMouse = true,
             )
         )
 
         val config = files.configFile.readText()
         assertTrue(config.contains("\"generation\": 3"))
-        assertTrue(config.contains("\"home_as_back\": true"))
-        assertTrue(config.contains("\"combo_hold_kill_app\": false"))
-        assertTrue(config.contains("\"virtual_mouse\": true"))
+        assertTrue(config.contains("\"home_single_action\": 1"))
+        assertTrue(config.contains("\"home_double_action\": 2"))
+        assertTrue(config.contains("\"home_hold_action\": 3"))
+        assertTrue(config.contains("\"select_start_hold_action\": 4"))
+        assertTrue(config.contains("\"select_r3_hold_action\": 5"))
     }
 
     @Test
@@ -176,7 +179,14 @@ class RootMirrorProcessRepositoryTest {
         )
 
         val delivered = reloading.applyLiveSettings(
-            MirrorSettings(configGeneration = 9L, homeAsBack = true, virtualMouse = false),
+            MirrorSettings(
+                configGeneration = 9L,
+                homeSinglePressAction = GestureAction.NONE,
+                homeDoublePressAction = GestureAction.HOME,
+                homeHoldAction = GestureAction.BACK,
+                selectStartHoldAction = GestureAction.RECENTS,
+                selectR3HoldAction = GestureAction.SLEEP,
+            ),
             ControllerMapping(listOf(Binding(ControlRef.button(304), ControlRef.button(307)))),
         )
 
@@ -184,8 +194,11 @@ class RootMirrorProcessRepositoryTest {
         assertEquals(files.controlFifo, poked)
         val config = files.configFile.readText()
         assertTrue(config.contains("\"generation\": 9"))
-        assertTrue(config.contains("\"home_as_back\": true"))
-        assertTrue(config.contains("\"virtual_mouse\": false"))
+        assertTrue(config.contains("\"home_single_action\": 0"))
+        assertTrue(config.contains("\"home_double_action\": 1"))
+        assertTrue(config.contains("\"home_hold_action\": 2"))
+        assertTrue(config.contains("\"select_start_hold_action\": 3"))
+        assertTrue(config.contains("\"select_r3_hold_action\": 6"))
         assertTrue(config.contains("\"bindings\": [[0, 304, 0, 0, 307, 0]]"))
         // The reload must never travel through PServer: that queue is serialized process-wide, and
         // keeping a toggle off it is the whole reason the fifo exists.
@@ -242,8 +255,6 @@ class RootMirrorProcessRepositoryTest {
             MirrorStartRequest(
                 source = "/dev/input/event9",
                 target = "/dev/input/event2",
-                homeAsBack = false,
-                comboHoldKillApp = false,
                 hideNodes = listOf("/dev/input/event10", "/dev/input/event11"),
             )
         )
@@ -259,8 +270,6 @@ class RootMirrorProcessRepositoryTest {
             MirrorStartRequest(
                 source = "/dev/input/event9",
                 target = "/dev/input/event2",
-                homeAsBack = false,
-                comboHoldKillApp = false,
             )
         )
 
@@ -276,8 +285,6 @@ class RootMirrorProcessRepositoryTest {
                 MirrorStartRequest(
                     source = "/dev/input/event9",
                     target = "/dev/input/event2",
-                    homeAsBack = false,
-                    comboHoldKillApp = false,
                 )
             )
         }
@@ -339,24 +346,30 @@ private class FakeSettingsRepository(
         state = state.copy(expectedRunning = expectedRunning)
     }
 
-    override fun setHomeAsBackEnabled(enabled: Boolean) {
-        state = state.copy(homeAsBack = enabled)
-    }
-
-    override fun setComboHoldKillAppEnabled(enabled: Boolean) {
-        state = state.copy(comboHoldKillApp = enabled)
-    }
-
-    override fun setVirtualMouseEnabled(enabled: Boolean) {
-        state = state.copy(virtualMouse = enabled)
+    override fun setGestureAction(gesture: ControllerGesture, action: GestureAction) {
+        state = when (gesture) {
+            ControllerGesture.HOME_SINGLE_PRESS -> state.copy(homeSinglePressAction = action)
+            ControllerGesture.HOME_DOUBLE_PRESS -> state.copy(homeDoublePressAction = action)
+            ControllerGesture.HOME_HOLD -> state.copy(homeHoldAction = action)
+            ControllerGesture.SELECT_START_HOLD -> state.copy(selectStartHoldAction = action)
+            ControllerGesture.SELECT_R3_HOLD -> state.copy(selectR3HoldAction = action)
+        }
     }
 
     override fun setAutoMirrorEnabled(enabled: Boolean) {
         state = state.copy(autoMirrorEnabled = enabled)
     }
 
+    override fun setAutoMirrorTrigger(trigger: AutoMirrorTrigger) {
+        state = state.copy(autoMirrorTrigger = trigger)
+    }
+
     override fun setManualInternalController(guid: String?) {
         state = state.copy(manualInternalGuid = guid)
+    }
+
+    override fun setManualExternalController(guid: String?) {
+        state = state.copy(manualExternalGuid = guid)
     }
 }
 

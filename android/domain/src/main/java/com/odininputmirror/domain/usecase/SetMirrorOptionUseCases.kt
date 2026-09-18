@@ -1,21 +1,12 @@
 package com.odininputmirror.domain.usecase
 
+import com.odininputmirror.domain.model.ControllerGesture
+import com.odininputmirror.domain.model.GestureAction
 import com.odininputmirror.domain.repository.MirrorSettingsRepository
 
-class SetHomeAsBackEnabledUseCase(
+class SetGestureActionUseCase(
     private val mirrorSettingsRepository: MirrorSettingsRepository,
 ) {
-    operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setHomeAsBackEnabled(enabled)
-}
-
-class SetComboHoldKillAppEnabledUseCase(
-    private val mirrorSettingsRepository: MirrorSettingsRepository,
-) {
-    operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setComboHoldKillAppEnabled(enabled)
-}
-
-class SetVirtualMouseEnabledUseCase(
-    private val mirrorSettingsRepository: MirrorSettingsRepository,
-) {
-    operator fun invoke(enabled: Boolean) = mirrorSettingsRepository.setVirtualMouseEnabled(enabled)
+    operator fun invoke(gesture: ControllerGesture, action: GestureAction) =
+        mirrorSettingsRepository.setGestureAction(gesture, action)
 }

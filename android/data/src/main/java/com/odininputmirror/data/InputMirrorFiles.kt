@@ -49,6 +49,12 @@ internal class InputMirrorFiles(
     val controlFifo: File
         get() = File(filesDir, "input_mirror.ctl")
 
+    val recentsStateFile: File
+        get() = File(filesDir, RECENTS_STATE_FILE_NAME)
+
+    val recentsEventsFile: File
+        get() = File(filesDir, RECENTS_EVENTS_FILE_NAME)
+
     /**
      * Create the control fifo if it isn't already there.
      *
